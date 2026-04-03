@@ -1,0 +1,8 @@
+{
+	"name": "glm",
+	"version": "0.1.0",
+	"description": "GLM (Z.ai) integration for Claude Code — delegate coding tasks to GLM, review code with GLM, and monitor usage quotas.",
+	"author": {
+		"name": "pyy0715"
+	}
+}

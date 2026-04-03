@@ -1,0 +1,21 @@
+{
+	"name": "glm-plugin-cc",
+	"owner": {
+		"name": "pyy0715"
+	},
+	"metadata": {
+		"description": "GLM (Z.ai) plugins for Claude Code — delegate coding tasks, review code, and monitor usage quotas.",
+		"version": "0.1.0"
+	},
+	"plugins": [
+		{
+			"name": "glm",
+			"description": "GLM (Z.ai) integration for Claude Code — delegate coding tasks to GLM, review code with GLM, and monitor usage quotas.",
+			"version": "0.1.0",
+			"author": {
+				"name": "pyy0715"
+			},
+			"source": "./plugins/glm"
+		}
+	]
+}
