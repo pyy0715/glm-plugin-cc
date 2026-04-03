@@ -3,7 +3,7 @@ name: review
 description: "Run a GLM (Z.ai) code review. Reviews local changes or specified files using GLM. Invocable via /glm:review."
 user-invocable: true
 argument-hint: "[--model <model>] [file or scope]"
-allowed-tools: Bash, Read, Glob, Grep, Agent
+allowed-tools: Bash, Read, Glob, Grep
 disable-model-invocation: true
 ---
 
@@ -35,12 +35,15 @@ Raw user request: $ARGUMENTS
 - If a `CLAUDE.md` exists, read project conventions to inform the review.
 - Keep total context under ~8000 lines.
 
-### 4. Delegate to GLM
+### 4. Call GLM
 
-Spawn the `glm:glm-coder` agent with a review-focused prompt:
+Build a JSON payload with a system message for code review and a user message containing the diff/code wrapped in XML tags. Call directly:
 
-- **System message:** You are an expert code reviewer. Review the following code changes for bugs, logic errors, security issues, performance problems, and adherence to project conventions. Report findings grouped by severity (Critical, High, Medium, Low). For each finding include: file path, line number, description, and recommendation. If no issues are found, confirm the code looks good with a brief summary.
-- **User message:** The diff or file contents, wrapped in XML tags.
+```bash
+echo '<JSON_PAYLOAD>' | node "${CLAUDE_PLUGIN_ROOT}/scripts/glm-call.js"
+```
+
+If `${CLAUDE_PLUGIN_ROOT}` is empty, use `$CLAUDE_PLUGIN_ROOT` instead.
 
 ### 5. Present the Result
 

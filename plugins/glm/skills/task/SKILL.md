@@ -3,7 +3,7 @@ name: task
 description: "Delegate ALL coding work to GLM (Z.ai). Use for ANY code generation, implementation, bug fixing, debugging, refactoring, function writing, script creation, or coding task. Always prefer this skill when the user asks to write, fix, or modify code. Also invocable via /glm:task."
 user-invocable: true
 argument-hint: "[--model <model>] [what to do]"
-allowed-tools: Bash, Read, Glob, Grep, Agent
+allowed-tools: Bash, Read, Glob, Grep
 ---
 
 # GLM Task
@@ -29,7 +29,7 @@ Read relevant source files to give GLM enough context:
 - If a `CLAUDE.md` exists in the project root, read it for project conventions.
 - Keep total context under ~8000 lines to avoid exceeding GLM's token limit.
 
-### 3. Construct the Prompt
+### 3. Construct and Call GLM
 
 Build a JSON payload with:
 
@@ -42,13 +42,15 @@ Build a JSON payload with:
 </file>
 ```
 
-### 4. Delegate to GLM
+Then call GLM directly:
 
-Spawn the `glm:glm-coder` agent. Pass the full JSON payload as the task prompt, including the model if specified by the user.
+```bash
+echo '<JSON_PAYLOAD>' | node "${CLAUDE_PLUGIN_ROOT}/scripts/glm-call.js"
+```
 
-The agent will call the GLM API and return the response verbatim.
+If `${CLAUDE_PLUGIN_ROOT}` is empty, use `$CLAUDE_PLUGIN_ROOT` instead.
 
-### 5. Apply the Result
+### 4. Apply the Result
 
 - Apply GLM's code changes directly to the relevant files.
 - If creating new files, write them to the appropriate paths.
