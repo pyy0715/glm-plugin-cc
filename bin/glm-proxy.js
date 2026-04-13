@@ -16,10 +16,8 @@ const config = load({
 	defaultBackend: values["default-backend"],
 });
 
-if (!config.backends.claude.apiKey) {
-	console.error("CLAUDE_API_KEY (or ANTHROPIC_API_KEY) is not set.");
-	process.exit(1);
-}
+// Claude API key is optional — OAuth users don't need it.
+// The proxy forwards the original auth headers for Claude routing.
 if (!config.backends.glm.apiKey) {
 	console.error("GLM_API_KEY is not set.");
 	process.exit(1);

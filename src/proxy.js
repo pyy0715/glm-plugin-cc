@@ -1,10 +1,13 @@
-import http from "node:http";
 // @ts-check
+import http from "node:http";
 import https from "node:https";
 
 /**
  * Forward a request to the upstream backend.
  * Replaces auth headers and pipes the response (including SSE streams).
+ *
+ * For Claude: preserves the original auth headers (OAuth token passthrough).
+ * For GLM: replaces auth with GLM API key.
  *
  * @param {http.IncomingMessage} clientReq
  * @param {http.ServerResponse} clientRes
@@ -15,12 +18,20 @@ export function forward(clientReq, clientRes, backend, bodyBuffer) {
 	const url = new URL(backend.baseUrl + clientReq.url);
 	const proto = url.protocol === "https:" ? https : http;
 
-	const { authorization: _, ...headers } = clientReq.headers;
-	// Replace auth with backend-specific key
-	headers["x-api-key"] = backend.apiKey;
+	/** @type {Record<string, string | string[] | undefined>} */
+	let headers;
+
+	if (backend.name === "claude") {
+		// Claude: preserve original auth headers (OAuth Bearer token from Claude Code)
+		headers = { ...clientReq.headers };
+	} else {
+		// GLM: strip original auth, use GLM API key
+		const { authorization: _, ...rest } = clientReq.headers;
+		headers = { ...rest, "x-api-key": backend.apiKey };
+	}
+
 	headers.host = url.hostname;
 	headers["anthropic-version"] = headers["anthropic-version"] || "2023-06-01";
-	// Content-Length must match the body we're sending
 	headers["content-length"] = String(bodyBuffer.length);
 
 	const options = {
