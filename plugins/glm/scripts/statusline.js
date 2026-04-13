@@ -98,21 +98,23 @@ process.stdin.on("end", async () => {
 		parts.push("claude 5h:--");
 	}
 
-	// GLM section: plan level + 5h usage (no reset time — API returns billing cycle reset, not 5h window)
+	// GLM section
 	// CLAUDE_PLUGIN_DATA is only set in plugin hook context, not in statusLine.
 	// Fall back to /tmp for cache when run from settings.json statusLine command.
 	const cacheDir = process.env.CLAUDE_PLUGIN_DATA || "/tmp";
 	const glm = await loadGlmQuota(cacheDir);
 	if (glm) {
-		const timeLim = glm.limits?.find((l) => l.type === "TIME_LIMIT");
-		if (timeLim) {
-			const pct = timeLim.percentage;
+		const stale = glm._stale ? "!" : "";
+		const level = glm.level || "?";
+
+		// TOKENS_LIMIT = 5-hour coding quota (confirmed via zai-org/zai-coding-plugins)
+		const tokLim = glm.limits?.find((l) => l.type === "TOKENS_LIMIT");
+		if (tokLim) {
+			const pct = tokLim.percentage;
 			const c = colorize(pct);
-			const stale = glm._stale ? "!" : "";
-			const level = glm.level || "?";
 			parts.push(`glm[${level}] 5h:${c}${pct}%${stale}${RESET}`);
 		} else {
-			parts.push("glm --");
+			parts.push(`glm[${level}] --`);
 		}
 	}
 
