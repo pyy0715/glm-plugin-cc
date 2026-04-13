@@ -1,6 +1,6 @@
 # glm-plugin-cc
 
-Claude Code plugin for [GLM (Z.ai)](https://z.ai) integration — delegate coding tasks to GLM, review code with GLM, and monitor usage quotas.
+Claude Code plugin for [GLM (Z.ai)](https://z.ai) integration — delegate coding tasks to GLM and monitor usage quotas.
 
 ## Installation
 
@@ -62,15 +62,6 @@ Delegate any coding work to GLM. Auto-triggers on all coding requests.
 ```
 /glm:task write a binary search function in Python
 /glm:task --model glm-5-turbo refactor this module
-```
-
-### `/glm:review`
-
-Run a GLM code review on local changes:
-
-```
-/glm:review
-/glm:review src/auth.js
 ```
 
 ### `/glm:setup`
