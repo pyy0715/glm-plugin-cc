@@ -50,18 +50,25 @@ function extractSessionId(metadata) {
 
 /**
  * Resolve which backend to route to.
- * Priority: 1) model prefix  2) session hint  3) default
+ *
+ * Priority:
+ *   1) `glm-*` prefix — explicit opt-in via the /model picker, always wins.
+ *   2) session-keyed hint — hook classification overrides Claude Code's
+ *      default `claude-*` model, because that model is just the default,
+ *      not an intentional routing decision.
+ *   3) `claude-*` prefix — Claude when no hint is set.
+ *   4) default backend.
+ *
  * @param {string | undefined} model
  * @param {unknown} metadata - request body metadata (for session_id)
  * @param {Config} config
  * @returns {Backend}
  */
 export function resolve(model, metadata, config) {
-	// 1. Model prefix — explicit user selection via /model always wins
+	// 1. glm-* is an explicit pick from the /model picker — always GLM.
 	if (model?.startsWith("glm-")) return config.backends.glm;
-	if (model?.startsWith("claude-")) return config.backends.claude;
 
-	// 2. Session-keyed hint from UserPromptSubmit hook
+	// 2. Session-keyed hint overrides the implicit `claude-*` default.
 	const sid = extractSessionId(metadata);
 	if (sid) {
 		const h = hints.get(sid);
@@ -70,6 +77,9 @@ export function resolve(model, metadata, config) {
 		}
 	}
 
-	// 3. Default
+	// 3. claude-* default when no hint is active.
+	if (model?.startsWith("claude-")) return config.backends.claude;
+
+	// 4. Default backend.
 	return config.backends[config.defaultBackend] || config.backends.claude;
 }

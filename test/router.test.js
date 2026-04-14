@@ -45,8 +45,25 @@ describe("router", () => {
 		assert.equal(backend.name, "claude");
 	});
 
-	it("model prefix takes priority over session hint", () => {
+	it("glm-* prefix wins over session hint (explicit opt-in)", () => {
+		setHint("sessA", "claude");
+		const backend = resolve("glm-5.1", metaFor("sessA"), config);
+		assert.equal(backend.name, "glm");
+	});
+
+	it("session hint overrides claude-* default model", () => {
 		setHint("sessA", "glm");
+		const backend = resolve("claude-opus-4-6", metaFor("sessA"), config);
+		assert.equal(backend.name, "glm");
+	});
+
+	it("session hint redirects claude-* model to claude when hint=claude", () => {
+		setHint("sessA", "claude");
+		const backend = resolve("claude-sonnet-4-6", metaFor("sessA"), config);
+		assert.equal(backend.name, "claude");
+	});
+
+	it("falls back to claude-* when no hint is set", () => {
 		const backend = resolve("claude-opus-4-6", metaFor("sessA"), config);
 		assert.equal(backend.name, "claude");
 	});

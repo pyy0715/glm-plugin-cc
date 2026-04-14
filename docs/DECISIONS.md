@@ -109,9 +109,12 @@ Claude Code에서 GLM(Z.ai)을 효율적으로 함께 사용하기 위한 도구
 
 | 순위 | 소스 | 설명 |
 |------|------|------|
-| 1 | `body.model` prefix | 사용자가 `/model`로 명시 선택. 항상 우선. 내부 haiku 호출(`claude-haiku-*`)도 여기 걸려서 Claude로 고정. |
-| 2 | **세션별** `/_hint` TTL | hook 자동 분류 결과. `body.metadata.user_id`에서 추출한 `session_id` 키로 조회. **세션 간 교차 오염 없음.** |
-| 3 | `config.defaultBackend` | 기본값 "claude". classifier 실패/미설치/분류 불가 시 여기로. |
+| 1 | `glm-*` prefix | 사용자가 `/model`에서 explicit하게 GLM을 고른 신호. 항상 GLM. |
+| 2 | **세션별** `/_hint` TTL | hook 자동 분류 결과. `body.metadata.user_id`에서 추출한 `session_id` 키로 조회. **세션 간 교차 오염 없음.** `claude-*` 기본 모델을 덮어씀. |
+| 3 | `claude-*` prefix | hint 없을 때의 기본 Claude. 내부 haiku 호출(`claude-haiku-*`)도 여기 걸려 Claude로 고정. |
+| 4 | `config.defaultBackend` | 최종 폴백. 기본값 "claude". |
+
+**왜 `claude-*` prefix가 hint보다 뒤에 오는가:** Claude Code가 기본으로 `claude-sonnet-4-6` / `claude-opus-4-6`를 요청에 실어보내기 때문에, 만약 prefix 우선이면 hook의 CODE 판정이 **항상 무시**됨. `claude-*`는 "기본값"이지 "명시 선택"이 아니므로 hint가 덮을 수 있어야 함. 반면 `glm-*`은 사용자가 picker에서 일부러 고른 것이라 explicit로 취급.
 
 ### 6. `/model` 피커에 GLM 추가
 
