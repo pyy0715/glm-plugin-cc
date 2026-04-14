@@ -2,7 +2,7 @@
 	"name": "glm-plugin-cc",
 	"private": true,
 	"type": "module",
-	"version": "0.1.0",
+	"version": "0.4.1",
 	"description": "GLM (Z.ai) integration plugin for Claude Code",
 	"engines": {
 		"node": ">=22.0.0"
