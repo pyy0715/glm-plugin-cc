@@ -246,16 +246,16 @@ glm-plugin-cc/
 │   ├── config.js                   설정 로드
 │   ├── router.js                   세션별 Map 기반 라우팅
 │   ├── proxy.js                    업스트림 파이핑 + OAuth 패스스루
-│   ├── server.js                   HTTP 서버 (/v1/messages, /_hint, /_status)
-│   └── classifier.js               CODE/OTHER 분류 (glm-4.7 via proxy)
-├── plugins/glm/
+│   └── server.js                   HTTP 서버 (/v1/messages, /_hint, /_status)
+├── plugins/glm/                    ← 플러그인 캐시는 이 서브트리만 복사
 │   ├── .claude-plugin/
-│   │   └── plugin.json
+│   │   └── plugin.json             version이 캐시 키. bump해야 새 내용 반영
 │   ├── scripts/
 │   │   └── statusline.js           쿼터 표시
 │   ├── hooks/
 │   │   ├── hooks.json              SessionStart + UserPromptSubmit 등록
 │   │   ├── session-start.js        프록시 자동 기동 + readiness 폴링
+│   │   ├── classifier.js           CODE/OTHER 분류 (glm-4.7 via proxy)
 │   │   └── route-hook.js           classify → /_hint POST
 │   └── skills/
 │       └── setup/SKILL.md          /glm:setup — settings.json 1회 구성

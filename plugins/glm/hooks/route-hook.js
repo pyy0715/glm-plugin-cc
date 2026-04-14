@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // @ts-check
 import fs from "node:fs";
-import { classify } from "../../../src/classifier.js";
+import { classify } from "./classifier.js";
 
 const PROXY_URL = process.env.GLM_PROXY_URL || "http://localhost:4000";
 const CLASSIFIER_TIMEOUT = Number(process.env.GLM_CLASSIFY_TIMEOUT_MS || 5000);
