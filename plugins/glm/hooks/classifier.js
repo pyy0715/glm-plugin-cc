@@ -1,32 +1,11 @@
 // @ts-check
 
-/**
- * Intent classifier for backend routing.
- *
- * The *right* split is production vs. conversation, not "software topic"
- * vs. "not software topic". GLM is the coding workhorse we want to hand
- * off when the user wants code PRODUCED or CHANGED. Claude stays in the
- * loop for explanation, advice, small talk, and general chat even about
- * technical subjects — it keeps the conversational context and the user
- * already pays for it via OAuth.
- *
- * References:
- *   - NVIDIA LLM Router (intent-based routing):
- *     github.com/NVIDIA-AI-Blueprints/llm-router
- *   - RouteLLM (preference-data routers):
- *     github.com/lm-sys/RouteLLM
- *   - Anthropic prompt-engineering guide (XML tags, balanced few-shot).
- *
- * Design choices:
- *   - English-only prompt. glm-4.7 handles multilingual input at runtime;
- *     a single-language prompt avoids the model hedging.
- *   - Keyword bias guard: "error", "bug", "NullPointerException",
- *     "kubectl", "git" all appear in BOTH CODE and OTHER examples so the
- *     model cannot shortcut on vocabulary.
- *   - Asymmetric tie-breaker: when uncertain pick OTHER. A misrouted
- *     OTHER means Claude does the work (fine); a misrouted CODE can
- *     overflow GLM's smaller context.
- */
+// Intent classifier for backend routing. The split is production vs.
+// conversation: CODE = user wants code produced or changed (→ GLM);
+// OTHER = everything else, including explanation/advice/chat about code
+// (→ Claude). English-only prompt (glm-4.7 handles multilingual input at
+// runtime). Keyword bias guarded by showing "error", "kubectl", "git" on
+// both sides of the few-shot. See docs/LEARNINGS.md §7 for the history.
 
 const SYSTEM_PROMPT = [
 	"<task>",
@@ -70,11 +49,8 @@ const SYSTEM_PROMPT = [
 	"</rules>",
 ].join("\n");
 
-/**
- * Few-shot matrix — 6 CODE, 6 OTHER. Pairs with matching vocabulary on
- * both sides so the model learns the production-vs-conversation split
- * rather than keyword match.
- */
+// 6 CODE + 6 OTHER with overlapping vocabulary so the split is learned
+// from intent, not keywords.
 const FEW_SHOT = [
 	// CODE — production / modification
 	{
@@ -137,12 +113,8 @@ const DEFAULT_TIMEOUT_MS = 5000;
 const DEFAULT_MODEL = "glm-4.7";
 
 /**
- * Classify whether a user prompt warrants the coding backend.
- * Routed through the local proxy so the call hits GLM via its
- * model-prefix rule; no separate auth needed.
- *
- * Returns null on any failure so callers fall back to the default backend
- * rather than misroute on noise.
+ * Returns null on any failure (timeout, bad response, unknown label) so
+ * the caller falls back to the default backend rather than misrouting.
  *
  * @param {string} prompt
  * @param {{ proxyUrl: string, timeoutMs?: number, model?: string }} opts

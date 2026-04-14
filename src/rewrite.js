@@ -1,13 +1,11 @@
 // @ts-check
 
 /**
- * Rewrite the request body's `model` field to a GLM model when the proxy
- * routes to GLM but the inbound model is not already `glm-*`.
- *
- * Why: Claude Code always sends `model` as one of the configured Anthropic
- * tier models (e.g. `claude-sonnet-4-6`). When the hook hint redirects the
- * request to GLM, forwarding that string verbatim makes Z.ai pick its own
- * default — so the user's choice (e.g. `glm-5.1`) is silently ignored.
+ * When the hook hint redirects a `claude-*` request to GLM, forwarding the
+ * original model name makes Z.ai pick its own default — silently ignoring
+ * the user's configured GLM model. This helper swaps `body.model` to the
+ * configured target unless the request already names a `glm-*` model (which
+ * means the user picked it explicitly via /model).
  *
  * @param {any} body
  * @param {{ targetModel: string }} opts

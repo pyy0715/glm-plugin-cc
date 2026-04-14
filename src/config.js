@@ -6,13 +6,14 @@
  * @property {{ claude: Backend, glm: Backend }} backends
  * @property {string} defaultBackend
  * @property {number} port
- * @property {string} glmRoutedModel - target model when proxy routes to GLM
- *   without an explicit `glm-*` request (used by rewriteModelForGlm).
+ * @property {string} glmRoutedModel - model substituted by rewriteModelForGlm
+ *   when a non-`glm-*` request routes to GLM.
  */
 
 /**
- * Load configuration from environment variables.
- * Claude routing uses OAuth passthrough, so no Claude API key is needed.
+ * Load config from env vars. Claude auth is OAuth passthrough so no
+ * Claude key is loaded here.
+ *
  * @param {object} [overrides]
  * @returns {Config}
  */

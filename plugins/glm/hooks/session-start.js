@@ -10,10 +10,6 @@ const READY_TIMEOUT_MS = Number(process.env.GLM_PROXY_READY_TIMEOUT_MS || 3000);
 const POLL_INTERVAL_MS = 100;
 const LOG_PATH = process.env.GLM_PROXY_LOG || "/tmp/glm-proxy.log";
 
-/**
- * @param {number} port
- * @returns {Promise<boolean>}
- */
 function checkPort(port) {
 	return new Promise((resolve) => {
 		const sock = net.createConnection(port, "127.0.0.1");
@@ -25,11 +21,6 @@ function checkPort(port) {
 	});
 }
 
-/**
- * @param {number} port
- * @param {number} deadline
- * @returns {Promise<boolean>}
- */
 async function waitReady(port, deadline) {
 	while (Date.now() < deadline) {
 		if (await checkPort(port)) return true;
@@ -39,11 +30,11 @@ async function waitReady(port, deadline) {
 }
 
 async function main() {
-	if (await checkPort(PORT)) return; // already running
-	if (!PROXY_PATH) return; // not yet setup — graceful no-op
+	if (await checkPort(PORT)) return;
+	if (!PROXY_PATH) return;
 
-	// Route proxy stdout/stderr to a log file so users can observe routing
-	// decisions without running the proxy in the foreground.
+	// Route proxy stdout/stderr to a file so routing is observable without
+	// keeping the proxy in the foreground.
 	const logFd = fs.openSync(LOG_PATH, "a");
 	const child = spawn(process.execPath, [PROXY_PATH], {
 		detached: true,

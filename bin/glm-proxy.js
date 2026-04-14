@@ -16,8 +16,7 @@ const config = load({
 	defaultBackend: values["default-backend"],
 });
 
-// Claude API key is optional — OAuth users don't need it.
-// The proxy forwards the original auth headers for Claude routing.
+// Claude auth is OAuth passthrough; only GLM_API_KEY is mandatory.
 if (!config.backends.glm.apiKey) {
 	console.error("GLM_API_KEY is not set.");
 	process.exit(1);

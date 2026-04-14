@@ -1,20 +1,16 @@
 // @ts-check
 
 /**
- * Strip thinking blocks (and redacted thinking) from assistant messages in
- * an Anthropic Messages API request body.
+ * Strip thinking / redacted_thinking blocks from assistant messages in an
+ * Anthropic Messages API request body. Thinking blocks carry a backend-
+ * specific signature; if the session's routing switches backends mid-
+ * conversation (Claude ↔ GLM), the new backend rejects history it did not
+ * sign with "Invalid signature in thinking block". The current turn's
+ * thinking is unaffected — it's produced fresh from the `thinking` request
+ * option, not from history.
  *
- * Why: thinking blocks carry a cryptographic signature from the backend that
- * produced them. When a session's routing switches between backends (e.g.
- * Claude -> GLM or the reverse), the new backend cannot verify the other's
- * signature and rejects the request with `Invalid signature in thinking block`.
- * We strip these blocks on the outbound path so each backend sees clean
- * history. The current turn's thinking is unaffected because it's generated
- * fresh from the `thinking` request option, not from history.
- *
- * @param {any} body - parsed request body (must be an object)
+ * @param {any} body
  * @returns {{ body: any, modified: boolean }}
- *   body is a new object when modified, or the original when untouched.
  */
 export function stripAssistantThinking(body) {
 	if (!body || !Array.isArray(body.messages)) {

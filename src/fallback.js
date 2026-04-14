@@ -1,28 +1,20 @@
 // @ts-check
 
-/**
- * Z.ai signals context-window overflow via this stop_reason in both the
- * non-streaming Messages API response and the SSE `message_delta` event.
- * Extracted as a constant so detectors and tests share a single source.
- */
+// Z.ai signals context overflow via this stop_reason in both non-streaming
+// responses and the SSE `message_delta` event.
 export const CONTEXT_EXCEEDED_STOP_REASON = "model_context_window_exceeded";
 
-/**
- * 400-path safety net: substrings that identify a context-window error
- * from a conventional Anthropic-style 400 response. Intentionally narrow —
- * extend only when a new message is actually observed.
- *
- * @type {string[]}
- */
+// Substrings that identify a context-window error from a conventional
+// Anthropic-style 400. Kept narrow; extend only when a new message is
+// actually observed in the wild.
+/** @type {string[]} */
 export const CONTEXT_LIMIT_PATTERNS = ["context window", "reached"];
 
 /**
- * Classic 400 invalid_request_error path. Kept as a safety net for the
- * Anthropic endpoint and in case Z.ai changes its policy.
- *
+ * 400 path. Safety net for the Anthropic endpoint and for a future Z.ai
+ * policy change.
  * @param {number} status
  * @param {unknown} parsedBody
- * @returns {boolean}
  */
 export function isContextLimitError(status, parsedBody) {
 	if (status !== 400) return false;
@@ -36,11 +28,9 @@ export function isContextLimitError(status, parsedBody) {
 }
 
 /**
- * Z.ai 200-path: observed behavior is status 200 + empty content + a top-level
- * `stop_reason` set to the sentinel. Call on a parsed non-streaming body.
- *
+ * 200 non-streaming path: Z.ai returns empty content with the sentinel
+ * stop_reason at the top level.
  * @param {unknown} parsedBody
- * @returns {boolean}
  */
 export function isContextLimitByStopReason(parsedBody) {
 	if (!parsedBody || typeof parsedBody !== "object") return false;
@@ -49,14 +39,15 @@ export function isContextLimitByStopReason(parsedBody) {
 }
 
 /**
- * Incremental SSE detector. The proxy feeds bytes as they arrive; the
- * detector tells the caller whether to fall back (`context_exceeded`),
- * commit to passthrough (`normal`), or keep buffering (`unknown`).
+ * Incremental SSE detector. Feed bytes as they arrive; the detector
+ * returns a verdict after each chunk:
+ *   - "context_exceeded": `message_delta` carried the overflow sentinel
+ *   - "normal": a `content_block_start` arrived, or a delta with any
+ *     other stop_reason — safe to passthrough
+ *   - "unknown": keep buffering
  *
- * A "normal" verdict is reached the moment we see evidence the model started
- * generating content: either `content_block_start` event, or a
- * `message_delta` whose `stop_reason` is not the overflow sentinel. Any
- * later chunks past a terminal verdict keep the same verdict.
+ * Once a terminal verdict is reached, subsequent feeds return it
+ * unchanged.
  *
  * @returns {{ feed(chunk: string): "context_exceeded" | "normal" | "unknown" }}
  */

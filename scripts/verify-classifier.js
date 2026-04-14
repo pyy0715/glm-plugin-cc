@@ -1,21 +1,9 @@
 #!/usr/bin/env node
 // @ts-check
-/**
- * Live classifier verification.
- * Requires a running proxy on $GLM_PROXY_URL (default http://localhost:4000).
- * Not part of `npm test` because it depends on network + GLM quota.
- *
- * Usage: node scripts/verify-classifier.js
- *
- * The split we're testing is production vs. conversation. GLM (CODE) is
- * the workhorse we hand off to when the user wants code PRODUCED or
- * CHANGED. Claude (OTHER) handles explanation, advice, chat, and any
- * conversational task — even about technical topics.
- *
- * All cases English-only to match the classifier prompt. The runtime
- * handles other languages via the intent-only rule, but mixing languages
- * in the regression suite would muddy the signal when a case fails.
- */
+// Live regression for the classifier. Runs against a real proxy on
+// $GLM_PROXY_URL (default http://localhost:4000) so it is not part of
+// `npm test`. Cases are English-only to match the prompt; non-English
+// inputs work at runtime but would muddy the signal on failure here.
 import { classify } from "../plugins/glm/hooks/classifier.js";
 
 const PROXY_URL = process.env.GLM_PROXY_URL || "http://localhost:4000";

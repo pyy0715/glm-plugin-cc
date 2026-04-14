@@ -3,11 +3,9 @@ import http from "node:http";
 import https from "node:https";
 
 /**
- * Forward a request to the upstream backend.
- * Replaces auth headers and pipes the response (including SSE streams).
- *
- * For Claude: preserves the original auth headers (OAuth token passthrough).
- * For GLM: replaces auth with GLM API key.
+ * Forward a request to the upstream backend. Claude gets the original auth
+ * headers (OAuth passthrough); GLM gets x-api-key swapped in. Response is
+ * piped back as-is, so SSE streams work transparently.
  *
  * @param {http.IncomingMessage} clientReq
  * @param {http.ServerResponse} clientRes
@@ -20,12 +18,9 @@ export function forward(clientReq, clientRes, backend, bodyBuffer) {
 
 	/** @type {Record<string, string | string[] | undefined>} */
 	let headers;
-
 	if (backend.name === "claude") {
-		// Claude: preserve original auth headers (OAuth Bearer token from Claude Code)
 		headers = { ...clientReq.headers };
 	} else {
-		// GLM: strip original auth, use GLM API key
 		const { authorization: _, ...rest } = clientReq.headers;
 		headers = { ...rest, "x-api-key": backend.apiKey };
 	}

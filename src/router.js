@@ -10,10 +10,9 @@
 const hints = new Map();
 
 /**
- * Store a routing hint for a specific session with TTL.
- * Also GCs expired entries.
+ * Store a session-scoped routing hint. Also GCs expired entries.
  * @param {string} sessionId
- * @param {string} backend - "glm" or "claude"
+ * @param {string} backend
  * @param {number} [ttlMs=60000]
  */
 export function setHint(sessionId, backend, ttlMs = 60_000) {
@@ -24,18 +23,12 @@ export function setHint(sessionId, backend, ttlMs = 60_000) {
 	}
 }
 
-/** Clear all session hints. */
 export function clearHints() {
 	hints.clear();
 }
 
-/**
- * Extract Claude Code session_id from the Anthropic API metadata field.
- * Claude Code encodes {device_id, account_uuid, session_id} as a JSON string
- * inside `metadata.user_id`.
- * @param {unknown} metadata
- * @returns {string | null}
- */
+// Claude Code encodes {device_id, account_uuid, session_id} as a JSON string
+// inside body.metadata.user_id.
 function extractSessionId(metadata) {
 	try {
 		const m = /** @type {{ user_id?: unknown } | undefined} */ (metadata);
@@ -49,32 +42,22 @@ function extractSessionId(metadata) {
 }
 
 /**
- * Resolve which backend to route to.
- *
- * Priority:
- *   1) `glm-*` prefix — explicit opt-in via the /model picker.
- *   2) `claude-haiku-*` prefix — Claude Code's internal haiku calls
- *      (title/summary generation). Not user-facing, so pin to Claude
- *      regardless of hint to avoid spending GLM quota on plumbing.
- *   3) session-keyed hint — hook classification overrides the implicit
- *      `claude-sonnet-*` / `claude-opus-*` default.
- *   4) `claude-*` prefix — Claude when no hint is active.
- *   5) default backend.
+ * Resolve which backend to route a request to. Priority (top-down):
+ *   glm-*            → GLM  (explicit user pick)
+ *   claude-haiku-*   → Claude  (internal title/summary calls; don't waste GLM quota)
+ *   session hint     → hint.backend
+ *   claude-*         → Claude  (default tier)
+ *   fallback         → config.defaultBackend
  *
  * @param {string | undefined} model
- * @param {unknown} metadata - request body metadata (for session_id)
+ * @param {unknown} metadata
  * @param {Config} config
  * @returns {Backend}
  */
 export function resolve(model, metadata, config) {
-	// 1. glm-* is an explicit pick from the /model picker — always GLM.
 	if (model?.startsWith("glm-")) return config.backends.glm;
-
-	// 2. Internal haiku (title / summary) is operational, not a user
-	//    routing intent — keep it on Claude regardless of hint.
 	if (model?.startsWith("claude-haiku-")) return config.backends.claude;
 
-	// 3. Session-keyed hint overrides the implicit `claude-*` default.
 	const sid = extractSessionId(metadata);
 	if (sid) {
 		const h = hints.get(sid);
@@ -83,9 +66,6 @@ export function resolve(model, metadata, config) {
 		}
 	}
 
-	// 4. claude-* default when no hint is active.
 	if (model?.startsWith("claude-")) return config.backends.claude;
-
-	// 5. Default backend.
 	return config.backends[config.defaultBackend] || config.backends.claude;
 }

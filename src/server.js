@@ -7,17 +7,21 @@ import { rewriteModelForGlm } from "./rewrite.js";
 import { resolve, setHint } from "./router.js";
 import { stripAssistantThinking } from "./sanitize.js";
 
-const NON_STREAM_BUFFER_LIMIT = 1024 * 1024; // 1 MB — full response capture
-const STREAM_PEEK_LIMIT = 64 * 1024; // 64 KB worth of SSE prelude is plenty
+const NON_STREAM_BUFFER_LIMIT = 1024 * 1024;
+const STREAM_PEEK_LIMIT = 64 * 1024;
 
-const debugEnabled = () => Boolean(process.env.GLM_DEBUG);
 function debug(...args) {
-	if (debugEnabled()) console.log(...args);
+	if (process.env.GLM_DEBUG) console.log(...args);
 }
 
 function sendJson(res, status, payload) {
 	res.writeHead(status, { "content-type": "application/json" });
 	res.end(JSON.stringify(payload));
+}
+
+function writeBufferedResponse(clientRes, status, headers, bodyBuffer) {
+	clientRes.writeHead(status, headers);
+	clientRes.end(bodyBuffer);
 }
 
 function handleHint(res, body) {
@@ -26,11 +30,7 @@ function handleHint(res, body) {
 		return;
 	}
 	setHint(body.session_id, body.backend, body.ttl || 60_000);
-	sendJson(res, 200, {
-		ok: true,
-		session_id: body.session_id,
-		backend: body.backend,
-	});
+	sendJson(res, 200, { ok: true, session_id: body.session_id, backend: body.backend });
 }
 
 function handleStatus(res, config) {
@@ -57,6 +57,8 @@ function buildHeaders(backend, sourceHeaders, bodyLength, hostname) {
 	return headers;
 }
 
+// Restore the user's original model so the Claude backend accepts the body
+// after we rewrote it to glm-5.1 for the GLM attempt.
 function buildFallbackBuffer(outboundBody, inboundModel) {
 	const { model: _dropped, ...rest } = outboundBody ?? {};
 	const restored = inboundModel ? { ...rest, model: inboundModel } : rest;
@@ -69,11 +71,6 @@ function parseMaybeJson(buffer) {
 	} catch {
 		return null;
 	}
-}
-
-function writeBufferedResponse(clientRes, statusCode, headers, bodyBuffer) {
-	clientRes.writeHead(statusCode, headers);
-	clientRes.end(bodyBuffer);
 }
 
 function forwardToClaude(clientReq, clientRes, config, outboundBody, inboundModel, reason) {
@@ -97,12 +94,10 @@ function glmRequestOptions(clientReq, backend, outboundBuffer) {
 	};
 }
 
-function handleGlmUpstreamError(clientRes) {
+function onUpstreamError(clientRes) {
 	return (err) => {
 		if (!clientRes.headersSent) {
-			sendJson(clientRes, 502, {
-				error: { message: `Upstream error: ${err.message}` },
-			});
+			sendJson(clientRes, 502, { error: { message: `Upstream error: ${err.message}` } });
 		}
 	};
 }
@@ -115,8 +110,7 @@ function tryGlmNonStreaming(
 	inboundModel,
 	config,
 ) {
-	const backend = config.backends.glm;
-	const { proto, options } = glmRequestOptions(clientReq, backend, outboundBuffer);
+	const { proto, options } = glmRequestOptions(clientReq, config.backends.glm, outboundBuffer);
 
 	const upstream = proto.request(options, (upstreamRes) => {
 		const status = upstreamRes.statusCode || 502;
@@ -171,18 +165,19 @@ function tryGlmNonStreaming(
 		});
 	});
 
-	upstream.on("error", handleGlmUpstreamError(clientRes));
+	upstream.on("error", onUpstreamError(clientRes));
 	upstream.write(outboundBuffer);
 	upstream.end();
 }
 
 function tryGlmStreaming(clientReq, clientRes, outboundBody, outboundBuffer, inboundModel, config) {
-	const backend = config.backends.glm;
-	const { proto, options } = glmRequestOptions(clientReq, backend, outboundBuffer);
+	const { proto, options } = glmRequestOptions(clientReq, config.backends.glm, outboundBuffer);
 
 	const upstream = proto.request(options, (upstreamRes) => {
 		const status = upstreamRes.statusCode || 502;
 
+		// Non-200 streaming replies aren't streams at all — buffer and reuse
+		// the same context-limit / passthrough logic the non-stream path has.
 		if (status !== 200) {
 			const chunks = [];
 			upstreamRes.on("data", (c) => chunks.push(c));
@@ -206,6 +201,9 @@ function tryGlmStreaming(clientReq, clientRes, outboundBody, outboundBuffer, inb
 			return;
 		}
 
+		// 200 SSE: buffer the prelude until the detector commits. We cannot
+		// write to the client before committing, because once writeHead fires
+		// we can't roll back to the Claude fallback.
 		const detector = createSseDetector();
 		const prelude = [];
 		let preludeBytes = 0;
@@ -221,8 +219,7 @@ function tryGlmStreaming(clientReq, clientRes, outboundBody, outboundBuffer, inb
 
 		upstreamRes.on("data", (chunk) => {
 			if (committed) return;
-			const asString = chunk.toString("utf8");
-			const verdict = detector.feed(asString);
+			const verdict = detector.feed(chunk.toString("utf8"));
 
 			if (verdict === "context_exceeded") {
 				upstreamRes.destroy();
@@ -255,7 +252,7 @@ function tryGlmStreaming(clientReq, clientRes, outboundBody, outboundBuffer, inb
 		});
 	});
 
-	upstream.on("error", handleGlmUpstreamError(clientRes));
+	upstream.on("error", onUpstreamError(clientRes));
 	upstream.write(outboundBuffer);
 	upstream.end();
 }
@@ -267,14 +264,10 @@ function handleProxy(req, res, body, bodyBuffer, config) {
 	const stripped = stripAssistantThinking(body);
 	let outboundBody = stripped.body;
 	let outboundModified = stripped.modified;
-	if (stripped.modified) {
-		debug("  stripped thinking blocks from assistant history");
-	}
+	if (stripped.modified) debug("  stripped thinking blocks from assistant history");
 
 	if (backend.name === "glm") {
-		const rewritten = rewriteModelForGlm(outboundBody, {
-			targetModel: config.glmRoutedModel,
-		});
+		const rewritten = rewriteModelForGlm(outboundBody, { targetModel: config.glmRoutedModel });
 		if (rewritten.modified) {
 			outboundBody = rewritten.body;
 			outboundModified = true;
@@ -282,27 +275,20 @@ function handleProxy(req, res, body, bodyBuffer, config) {
 	}
 
 	const outboundModel = outboundBody?.model || inboundModel;
-	const sameModel = outboundModel === inboundModel;
-	const tag = sameModel ? "" : ` [${outboundModel}]`;
+	const tag = outboundModel === inboundModel ? "" : ` [${outboundModel}]`;
 	console.log(`[${new Date().toISOString()}] ${inboundModel} -> ${backend.name}${tag}`);
-	if (debugEnabled()) {
-		debug(
-			"  metadata:",
-			JSON.stringify(body.metadata),
-			"system:",
-			Array.isArray(body.system) ? `array[${body.system.length}]` : typeof body.system,
-		);
-	}
+	debug(
+		"  metadata:",
+		JSON.stringify(body.metadata),
+		"system:",
+		Array.isArray(body.system) ? `array[${body.system.length}]` : typeof body.system,
+	);
 
 	const outboundBuffer = outboundModified ? Buffer.from(JSON.stringify(outboundBody)) : bodyBuffer;
 
 	if (backend.name === "glm") {
-		const isStream = body?.stream === true;
-		if (isStream) {
-			tryGlmStreaming(req, res, outboundBody, outboundBuffer, body.model, config);
-		} else {
-			tryGlmNonStreaming(req, res, outboundBody, outboundBuffer, body.model, config);
-		}
+		const run = body?.stream === true ? tryGlmStreaming : tryGlmNonStreaming;
+		run(req, res, outboundBody, outboundBuffer, body.model, config);
 		return;
 	}
 
@@ -317,11 +303,6 @@ function parseJsonOrEmpty(buffer) {
 	}
 }
 
-/**
- * Create the proxy server.
- * @param {import("./config.js").Config} config
- * @returns {http.Server}
- */
 export function createServer(config) {
 	return http.createServer((req, res) => {
 		const chunks = [];
@@ -337,12 +318,10 @@ export function createServer(config) {
 				}
 				return;
 			}
-
 			if (req.url === "/_status" && req.method === "GET") {
 				handleStatus(res, config);
 				return;
 			}
-
 			handleProxy(req, res, parseJsonOrEmpty(bodyBuffer), bodyBuffer, config);
 		});
 	});
