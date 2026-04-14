@@ -1,49 +1,144 @@
 // @ts-check
 
+/**
+ * Intent classifier for backend routing.
+ *
+ * The *right* split is production vs. conversation, not "software topic"
+ * vs. "not software topic". GLM is the coding workhorse we want to hand
+ * off when the user wants code PRODUCED or CHANGED. Claude stays in the
+ * loop for explanation, advice, small talk, and general chat even about
+ * technical subjects — it keeps the conversational context and the user
+ * already pays for it via OAuth.
+ *
+ * References:
+ *   - NVIDIA LLM Router (intent-based routing):
+ *     github.com/NVIDIA-AI-Blueprints/llm-router
+ *   - RouteLLM (preference-data routers):
+ *     github.com/lm-sys/RouteLLM
+ *   - Anthropic prompt-engineering guide (XML tags, balanced few-shot).
+ *
+ * Design choices:
+ *   - English-only prompt. glm-4.7 handles multilingual input at runtime;
+ *     a single-language prompt avoids the model hedging.
+ *   - Keyword bias guard: "error", "bug", "NullPointerException",
+ *     "kubectl", "git" all appear in BOTH CODE and OTHER examples so the
+ *     model cannot shortcut on vocabulary.
+ *   - Asymmetric tie-breaker: when uncertain pick OTHER. A misrouted
+ *     OTHER means Claude does the work (fine); a misrouted CODE can
+ *     overflow GLM's smaller context.
+ */
+
 const SYSTEM_PROMPT = [
 	"<task>",
-	"Classify the user message as CODE or OTHER.",
-	"Reply with exactly one word, uppercase, no punctuation.",
+	"Classify the user's next message as CODE or OTHER.",
+	"Reply with exactly one word, uppercase, no explanation, no punctuation.",
 	"</task>",
 	"",
+	"<definition>",
+	"CODE: the user wants code produced or changed. Concretely:",
+	"  - write / generate a new function, script, test, schema, config",
+	"  - edit / refactor / migrate / optimize / rename existing code",
+	"  - fix a bug in a named artifact (function, file, service)",
+	"  - apply a concrete change the user is clearly planning to execute",
+	"",
+	"OTHER: everything else, including things that MENTION code:",
+	"  - explain how something works (a command, a tool, a concept,",
+	"    a regex, a piece of code the user pasted) — explanation is a",
+	"    conversation task, not a production task",
+	"  - recommend an approach, compare options, give advice",
+	"  - answer factual or general-knowledge questions",
+	"  - translate, summarize, rewrite prose",
+	"  - casual chat, venting, status reports, complaints",
+	'  - meta-questions about the prior turn ("say that again",',
+	'    "what did you mean")',
+	"</definition>",
+	"",
 	"<rules>",
-	"CODE = the user explicitly asks for a coding/engineering action:",
-	"  write, edit, fix, run, debug, refactor, review, implement, analyze,",
-	"  explain, or teach a specific piece of code, a shell/git command,",
-	"  a regex, or a CLI flag. Asking 'how do I do X with a command' is CODE.",
-	"",
-	"OTHER = anything else, including:",
-	"  - complaints or status reports that mention errors/bugs without a concrete request",
-	"  - general knowledge, opinions, casual chat, translation of prose",
-	"  - short acknowledgements or meta-questions about the prior turn",
-	"",
-	"Tie-breaker: when in doubt, choose OTHER.",
-	"The mere presence of technical vocabulary (error, bug, code, stack trace,",
-	"function name, exception type) is NOT sufficient on its own. The user",
-	"must explicitly request a coding action.",
+	'- The split is production vs. conversation. CODE means "please',
+	'  write or change code". Everything conversational — including',
+	"  teaching, explaining, debugging-by-talking, or giving opinions —",
+	"  is OTHER.",
+	"- Technical vocabulary (error, kubectl, NullPointerException, regex)",
+	"  is NOT a signal by itself. An explanation request about kubectl is",
+	"  OTHER; a request to write a Helm chart is CODE.",
+	'- A bare command like "git rebase onto main" is CODE only if the',
+	'  user clearly wants it performed or scripted. "What does git rebase',
+	'  do" is OTHER.',
+	"- Any natural language is fine; judge by intent regardless of",
+	"  language.",
+	"- When genuinely uncertain, choose OTHER.",
 	"</rules>",
 ].join("\n");
 
-// 5-shot: CODE ×2, OTHER ×3. "에러/error" vocabulary intentionally appears
-// on BOTH sides so the model cannot shortcut on keywords alone.
+/**
+ * Few-shot matrix — 6 CODE, 6 OTHER. Pairs with matching vocabulary on
+ * both sides so the model learns the production-vs-conversation split
+ * rather than keyword match.
+ */
 const FEW_SHOT = [
-	{ role: "user", content: "write a python function to reverse a string" },
+	// CODE — production / modification
+	{
+		role: "user",
+		content: "write a python function that validates IPv4 addresses",
+	},
 	{ role: "assistant", content: "CODE" },
-	{ role: "user", content: "왜 이 함수 NullPointerException 나는지 고쳐줘" },
+	{
+		role: "user",
+		content: "this sort is O(n^2) with nested loops, rewrite it in O(n log n)",
+	},
 	{ role: "assistant", content: "CODE" },
-	{ role: "user", content: "프랑스 수도가 어디야?" },
+	{
+		role: "user",
+		content: "fix OrderService.finalize so it stops throwing NullPointerException on empty carts",
+	},
+	{ role: "assistant", content: "CODE" },
+	{
+		role: "user",
+		content: "migrate this test suite from jest to vitest",
+	},
+	{ role: "assistant", content: "CODE" },
+	{
+		role: "user",
+		content: "add a /health endpoint to this Express app that returns version and uptime",
+	},
+	{ role: "assistant", content: "CODE" },
+	{
+		role: "user",
+		content: "scaffold a typescript CLI that takes a file path and prints line counts",
+	},
+	{ role: "assistant", content: "CODE" },
+
+	// OTHER — explanation, advice, chat (some with technical vocabulary)
+	{
+		role: "user",
+		content: "explain what kubectl rollout restart does and when to use it",
+	},
 	{ role: "assistant", content: "OTHER" },
-	{ role: "user", content: "에러 계속 나서 짜증나네" },
+	{
+		role: "user",
+		content: "Sentry keeps showing NullPointerException but I have no repro, any ideas why?",
+	},
 	{ role: "assistant", content: "OTHER" },
-	{ role: "user", content: "방금 뭐라고 했어?" },
+	{ role: "user", content: "this error keeps happening and it's annoying" },
+	{ role: "assistant", content: "OTHER" },
+	{ role: "user", content: "what is the capital of France?" },
+	{ role: "assistant", content: "OTHER" },
+	{ role: "user", content: "what did you just say? say it again" },
+	{ role: "assistant", content: "OTHER" },
+	{
+		role: "user",
+		content: "should I pick Postgres or MySQL for a small side project?",
+	},
 	{ role: "assistant", content: "OTHER" },
 ];
 
 const MAX_PROMPT_CHARS = 2000;
+const DEFAULT_TIMEOUT_MS = 5000;
+const DEFAULT_MODEL = "glm-4.7";
 
 /**
- * Classify whether a user prompt is code-related.
- * Routed through the local proxy so the call hits GLM via the proxy's
+ * Classify whether a user prompt warrants the coding backend.
+ * Routed through the local proxy so the call hits GLM via its
  * model-prefix rule; no separate auth needed.
  *
  * Returns null on any failure so callers fall back to the default backend
@@ -54,7 +149,7 @@ const MAX_PROMPT_CHARS = 2000;
  * @returns {Promise<"CODE" | "OTHER" | null>}
  */
 export async function classify(prompt, opts) {
-	const { proxyUrl, timeoutMs = 5000, model = "glm-4.7" } = opts;
+	const { proxyUrl, timeoutMs = DEFAULT_TIMEOUT_MS, model = DEFAULT_MODEL } = opts;
 	const controller = new AbortController();
 	const timer = setTimeout(() => controller.abort(), timeoutMs);
 	try {

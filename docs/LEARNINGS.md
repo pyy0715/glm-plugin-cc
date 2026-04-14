@@ -205,19 +205,27 @@ proxy는 `upstreamRes.pipe(clientRes)`로 바디 스트리밍. 별도 처리 없
 - System prompt 분리, 프롬프트 앞 2000자로 자름
 - 5초 timeout, 실패 시 `null` 반환 → hint 미전송 → default 백엔드 사용
 
-### 7.2 Few-shot bias 사건 (2026-04-14)
+### 7.2 Classifier 재설계 기록 (2026-04-14)
 
-**증상**: "이전 프롬프트 확인해 계속 에러나잖아", "에러나는데" 같은 단순 불평 프롬프트가 모두 **CODE로 오분류** → GLM 라우팅 → GLM context 초과로 사용자 에러.
+원래 접근은 "software 관련 = CODE"였지만, 두 가지 문제로 두 번 고침.
 
-**진단**: `scripts/verify-classifier.js` 격리 테스트로 재현. Few-shot에서 `"이 스택 트레이스 왜 NullPointerException 나는거야?" → CODE` 예시가 "에러"라는 키워드를 CODE 쪽으로 끌어당기는 어휘 편향 유발. Zero-shot(예시 없음)으로만 같은 입력 보내면 OTHER로 정분류되어 few-shot이 오히려 정확도를 **떨어뜨렸음** 확인.
+**1차: few-shot 어휘 편향 (7-shot → 5-shot balanced)**
+- 증상: "에러나는데" 같은 단순 불평이 CODE로 오분류 → GLM 라우팅 → context overflow
+- 원인: "NullPointerException" CODE 예시가 "에러" 한국어 키워드를 CODE 쪽으로 편향
+- 1차 수정: 예시 수 축소 + 어휘 분산 (에러 관련 표현이 CODE/OTHER 양쪽에 등장)
 
-**해결**: Anthropic 공식 가이드(`platform.claude.com/docs/en/build-with-claude/prompt-engineering`) 기반 재설계.
+**2차: "production vs. conversation" 재정의 (NVIDIA LLM Router 패턴 참고)**
+- 증상: `explain kubectl`, `explain what this regex matches` 같은 교육/설명 질문이 CODE로 분류됨
+- 재평가: 사용자 피드백 — kubectl 설명이 왜 GLM으로 가야 하나? Claude가 대화 맥락 유지에 낫다
+- **재정의**: CODE는 **코드를 생산/수정**하려는 의도(write/edit/refactor/fix a named artifact)만. 설명/조언/질문은 전부 OTHER (Claude).
+- 참고: NVIDIA LLM Router (`github.com/NVIDIA-AI-Blueprints/llm-router`)의 intent-based 패턴 — 카테고리마다 한 줄 설명, one-word 출력
+- 결과: 30/30 통과 (verify-classifier.js). "explain what ..." 류는 모두 OTHER로 정분류.
 
-- **XML rules** (`<task>`, `<rules>`) — system prompt에 운영 정의 명시, "tie-breaker: when in doubt OTHER" 한 줄
-- **5-shot with balanced vocabulary** — CODE 2 / OTHER 3. "에러" 같은 키워드가 **양쪽 모두에** 등장하도록 설계:
-  - CODE 쪽: "왜 이 함수 NullPointerException 나는지 고쳐줘" (기술 어휘 + 액션 동사)
-  - OTHER 쪽: "에러 계속 나서 짜증나네" (불평만), "방금 뭐라고 했어?" (prior-turn 메타)
-- **운영 정의 보강** — "how do I do X with a command" 같은 정보 요청도 CODE로 명시 (git/shell 도메인)
+현 구성:
+- **영어 전용** system prompt (XML `<task>`/`<definition>`/`<rules>`)
+- **6+6 few-shot**: CODE(production/modification/fix), OTHER(explanation/diagnostic question/opinion/chat/general/meta)
+- 어휘 분산: "error", "NullPointerException", "kubectl", "git" 모두 양쪽에 등장
+- Asymmetric tie-breaker: 불확실하면 OTHER (misrouted OTHER는 무해, misrouted CODE는 context overflow 위험)
 
 ### 7.3 검증 자동화
 
