@@ -57,6 +57,12 @@ describe("router", () => {
 		assert.equal(backend.name, "glm");
 	});
 
+	it("claude-haiku-* stays on claude even with glm hint (internal haiku)", () => {
+		setHint("sessA", "glm");
+		const backend = resolve("claude-haiku-4-6", metaFor("sessA"), config);
+		assert.equal(backend.name, "claude");
+	});
+
 	it("session hint redirects claude-* model to claude when hint=claude", () => {
 		setHint("sessA", "claude");
 		const backend = resolve("claude-sonnet-4-6", metaFor("sessA"), config);

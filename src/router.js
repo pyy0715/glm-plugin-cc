@@ -52,12 +52,14 @@ function extractSessionId(metadata) {
  * Resolve which backend to route to.
  *
  * Priority:
- *   1) `glm-*` prefix — explicit opt-in via the /model picker, always wins.
- *   2) session-keyed hint — hook classification overrides Claude Code's
- *      default `claude-*` model, because that model is just the default,
- *      not an intentional routing decision.
- *   3) `claude-*` prefix — Claude when no hint is set.
- *   4) default backend.
+ *   1) `glm-*` prefix — explicit opt-in via the /model picker.
+ *   2) `claude-haiku-*` prefix — Claude Code's internal haiku calls
+ *      (title/summary generation). Not user-facing, so pin to Claude
+ *      regardless of hint to avoid spending GLM quota on plumbing.
+ *   3) session-keyed hint — hook classification overrides the implicit
+ *      `claude-sonnet-*` / `claude-opus-*` default.
+ *   4) `claude-*` prefix — Claude when no hint is active.
+ *   5) default backend.
  *
  * @param {string | undefined} model
  * @param {unknown} metadata - request body metadata (for session_id)
@@ -68,7 +70,11 @@ export function resolve(model, metadata, config) {
 	// 1. glm-* is an explicit pick from the /model picker — always GLM.
 	if (model?.startsWith("glm-")) return config.backends.glm;
 
-	// 2. Session-keyed hint overrides the implicit `claude-*` default.
+	// 2. Internal haiku (title / summary) is operational, not a user
+	//    routing intent — keep it on Claude regardless of hint.
+	if (model?.startsWith("claude-haiku-")) return config.backends.claude;
+
+	// 3. Session-keyed hint overrides the implicit `claude-*` default.
 	const sid = extractSessionId(metadata);
 	if (sid) {
 		const h = hints.get(sid);
@@ -77,9 +83,9 @@ export function resolve(model, metadata, config) {
 		}
 	}
 
-	// 3. claude-* default when no hint is active.
+	// 4. claude-* default when no hint is active.
 	if (model?.startsWith("claude-")) return config.backends.claude;
 
-	// 4. Default backend.
+	// 5. Default backend.
 	return config.backends[config.defaultBackend] || config.backends.claude;
 }
