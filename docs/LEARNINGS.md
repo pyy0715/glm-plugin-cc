@@ -285,16 +285,20 @@ Dev 모드 setup이 번거로울 때, 디버그용으로 `~/.claude/plugins/cach
 
 ## 10. 관측된 미해결 이슈
 
-### 10.1 Turn-1 blocking anomaly
+### 10.1 Turn-1 blocking anomaly (더 이상 재현 안 됨)
 
-한 세션의 **첫 프롬프트**에서 classifier 요청(47:19.097)와 main opus 요청(47:19.111) 간격이 14ms로 관측된 적 있음. Classifier가 반환할 시간이 안 됐으므로 Hook이 blocking되지 않은 것처럼 보이나, **Turn 2**에서는 ~900ms 간격으로 정상 blocking.
+**과거 관측 (2026-04-14 초반):** 한 세션의 첫 프롬프트에서 classifier 요청과 main opus 요청 간격이 14ms로 관측된 적 있음. Classifier(평균 700–900ms)가 반환했을 리 없는 간격이라 hook이 blocking되지 않은 것으로 보였음. Turn 2에서는 ~900ms로 정상 blocking.
 
-가설:
-- Claude Code 첫 프롬프트는 별도 경로로 처리
-- Hook 자체가 경고 없이 조기 exit하는 경로 존재
-- Claude Code가 특정 조건에서 hook 결과 대기를 스킵
+**이후 관측 (thinking strip + cache 클린 이후):** Turn 1 / Turn 2 모두 일관되게 1–3초 간격으로 정상 blocking. 14ms anomaly 재현 안 됨.
 
-재현 규칙 미확인. 추가 실험 필요.
+**가장 유력한 원인 추정:** 당시 `installed_plugins.json`에 활성 버전은 `0.1.0`이었고 캐시 디렉터리엔 `0.1.0`, `0.2.0`, `0.2.1`이 뒤섞여 있었음. Claude Code가 로드한 hook이 **의도한 버전이 아니었을 가능성이 매우 높음**. 옛 버전 hook이 `await fetch(...)`를 제대로 기다리지 않았거나, 다른 async 이슈가 있었을 수 있음. 캐시 정리(`rm -rf ~/.claude/plugins/cache/glm-plugin-cc`) + plugin.json version bump로 `installed_plugins.json`이 0.2.3을 가리키게 정상화된 이후 재발 없음.
+
+**교훈:** Hook/skill 디버깅 시 **가장 먼저 확인**할 것:
+```bash
+cat ~/.claude/plugins/installed_plugins.json | python3 -c "import json,sys; p=json.load(sys.stdin)['plugins']['glm@glm-plugin-cc']; print(p[0]['installPath'], p[0]['version'])"
+ls ~/.claude/plugins/cache/glm-plugin-cc/glm/
+```
+활성 `installPath` 아래의 hook 파일이 실제 읽히는 것임. 캐시 디렉터리에 다른 버전이 있다고 해서 그게 활성은 아님.
 
 ### 10.2 Thinking block signature mismatch (해결됨)
 
