@@ -1,0 +1,27 @@
+{
+	"description": "GLM proxy auto-start and user prompt routing",
+	"hooks": {
+		"SessionStart": [
+			{
+				"hooks": [
+					{
+						"type": "command",
+						"command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/session-start.js\"",
+						"timeout": 5
+					}
+				]
+			}
+		],
+		"UserPromptSubmit": [
+			{
+				"hooks": [
+					{
+						"type": "command",
+						"command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/route-hook.js\"",
+						"timeout": 10
+					}
+				]
+			}
+		]
+	}
+}

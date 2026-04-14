@@ -19,14 +19,20 @@ export function createServer(config) {
 			if (req.url === "/_hint" && req.method === "POST") {
 				try {
 					const hint = JSON.parse(bodyBuffer.toString());
-					if (hint.backend) {
-						setHint(hint.backend, hint.ttl || 60_000);
-						res.writeHead(200, { "content-type": "application/json" });
-						res.end(JSON.stringify({ ok: true, backend: hint.backend }));
-					} else {
+					if (!hint.session_id || !hint.backend) {
 						res.writeHead(400, { "content-type": "application/json" });
-						res.end(JSON.stringify({ error: "missing backend field" }));
+						res.end(JSON.stringify({ error: "missing session_id or backend field" }));
+						return;
 					}
+					setHint(hint.session_id, hint.backend, hint.ttl || 60_000);
+					res.writeHead(200, { "content-type": "application/json" });
+					res.end(
+						JSON.stringify({
+							ok: true,
+							session_id: hint.session_id,
+							backend: hint.backend,
+						}),
+					);
 				} catch {
 					res.writeHead(400, { "content-type": "application/json" });
 					res.end(JSON.stringify({ error: "invalid JSON" }));
@@ -55,9 +61,17 @@ export function createServer(config) {
 				// Non-JSON request — forward as-is
 			}
 
-			const backend = resolve(body.model, config);
+			const backend = resolve(body.model, body.metadata, config);
 			const ts = new Date().toISOString();
 			console.log(`[${ts}] ${body.model || "unknown"} -> ${backend.name}`);
+			if (process.env.GLM_DEBUG) {
+				console.log(
+					"  metadata:",
+					JSON.stringify(body.metadata),
+					"system:",
+					Array.isArray(body.system) ? `array[${body.system.length}]` : typeof body.system,
+				);
+			}
 
 			forward(req, res, backend, bodyBuffer);
 		});

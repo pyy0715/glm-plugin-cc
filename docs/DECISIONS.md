@@ -48,9 +48,18 @@ Claude Code에서 GLM(Z.ai)을 효율적으로 함께 사용하기 위한 도구
 - `src/config.js` — 환경변수 설정 로드
 - `bin/glm-proxy.js` — CLI 진입점
 
-### Phase 3: Hook 자동 라우팅 (미구현, 설계 완료)
+### Phase 3: Hook 자동 라우팅 + 세션 안전성 (2026-04-14 구현)
 
-**접근:** `UserPromptSubmit` hook이 사용자 메시지를 분류하여 프록시에 라우팅 힌트 전달.
+**구현물:**
+- `src/classifier.js` — `glm-4.7` via localhost proxy로 CODE/OTHER 분류 (max_tokens=4, 5s timeout)
+- `plugins/glm/hooks/route-hook.js` — UserPromptSubmit 진입점. classify → `/_hint` POST (session_id 포함)
+- `plugins/glm/hooks/session-start.js` — SessionStart에서 프록시 살아있는지 체크, 죽어있으면 `spawn + detached + unref`로 기동하고 최대 3초 readiness 폴링
+- `plugins/glm/hooks/hooks.json` — hook 등록 (UserPromptSubmit timeout 10s, SessionStart 5s)
+- `plugins/glm/skills/setup/SKILL.md` — `/glm:setup`: settings.json의 env에 `ANTHROPIC_BASE_URL`, `GLM_API_KEY`, `GLM_PROXY_PATH` 주입
+
+**동시 세션 교차 오염 해결:** `src/router.js`의 `currentHint` 전역 변수를 `Map<session_id, hint>`로 교체. `body.metadata.user_id`(stringified JSON)에서 `session_id` 추출 후 세션별 힌트 조회. 같은 proxy를 공유하는 다수 Claude Code 세션이 서로 간섭 없이 독립 라우팅.
+
+**Breaking change (내부 API):** `/_hint` 엔드포인트 바디가 `{backend, ttl}` → `{session_id, backend, ttl}`로 변경. `session_id` 누락 시 400. `setHint()` 시그니처도 `(sessionId, backend, ttl)`로 바뀜. 외부 직접 호출자 없으므로 사용자 영향 없음.
 
 ---
 
@@ -100,9 +109,9 @@ Claude Code에서 GLM(Z.ai)을 효율적으로 함께 사용하기 위한 도구
 
 | 순위 | 소스 | 설명 |
 |------|------|------|
-| 1 | `body.model` prefix | 사용자가 `/model`로 명시 선택. 항상 우선 |
-| 2 | `/_hint` TTL | hook 자동 분류 결과 (Phase 3) |
-| 3 | `config.defaultBackend` | 기본값 "claude" |
+| 1 | `body.model` prefix | 사용자가 `/model`로 명시 선택. 항상 우선. 내부 haiku 호출(`claude-haiku-*`)도 여기 걸려서 Claude로 고정. |
+| 2 | **세션별** `/_hint` TTL | hook 자동 분류 결과. `body.metadata.user_id`에서 추출한 `session_id` 키로 조회. **세션 간 교차 오염 없음.** |
+| 3 | `config.defaultBackend` | 기본값 "claude". classifier 실패/미설치/분류 불가 시 여기로. |
 
 ### 6. `/model` 피커에 GLM 추가
 
@@ -202,20 +211,24 @@ Z.ai 공식 플러그인(`zai-org/zai-coding-plugins`)에서 확인:
 ## 향후 할 일 (TODO)
 
 ### Phase 2 잔여 — 프록시 안정화
-- [ ] 프록시 데몬 모드 (`--detach` 또는 SessionStart hook에서 자동 시작)
-- [ ] 프록시 다운 시 graceful fallback
-- [ ] 기존 플러그인 스킬 코드 정리 (task, setup, glm-call.js 제거)
+- [x] ~~프록시 데몬 모드 (`--detach`)~~ → SessionStart hook이 자동 기동 (2026-04-14 구현)
+- [x] 기존 플러그인 스킬 코드 정리 (완료: 34e19bf)
+- [ ] 프록시 다운 시 graceful fallback (현재는 ECONNREFUSED → Claude Code 에러)
 - [ ] README 프록시 방식으로 전면 개편
 - [ ] 모델 전환 지연 (~20초) 원인 조사 — `claude-haiku` 내부 호출이 관련?
 
-### Phase 3 — Hook 자동 라우팅
-- [ ] `src/classifier.js` — LLM 기반 분류 (haiku급 모델로 "CODE or OTHER?" 판단)
-- [ ] `hooks/route-hook.js` — hook 진입점 (classify → send hint)
-- [ ] `hooks/hooks.json` — UserPromptSubmit hook 등록
-- [ ] 분류 정확도 테스트 + 프롬프트 튜닝
-- [ ] 지연 측정 (~500ms 허용 범위 확인)
+### Phase 3 — Hook 자동 라우팅 (2026-04-14 완료)
+- [x] `src/classifier.js` — `glm-4.7` via localhost proxy로 CODE/OTHER 판단
+- [x] `plugins/glm/hooks/route-hook.js` — UserPromptSubmit 진입점
+- [x] `plugins/glm/hooks/session-start.js` — 프록시 자동 기동 + readiness 폴링
+- [x] `plugins/glm/hooks/hooks.json` — hook 등록
+- [x] `plugins/glm/skills/setup/SKILL.md` — `/glm:setup`
+- [ ] 분류 정확도 테스트 + 프롬프트 튜닝 (실사용 피드백 기반)
+- [ ] 지연 측정 (hook 전체 ~500ms 허용 범위 확인)
+- [ ] `/reload-plugins`가 env var 재적용하는지 실증 검증
 
 ### Phase 4 — 추가 기능
+- [ ] (선택) launchd plist + systemd user service 템플릿 — claude 미가동 시에도 프록시 상시 운영용
 - [ ] `ANTHROPIC_CUSTOM_MODEL_OPTION`으로 GLM 모델 여러 개 추가 가능한지 확인 (현재 1개 제한)
 - [ ] 모델 자동 라우팅: GLM-5.1 (복잡), GLM-4.7 (일반) 자동 선택
 - [ ] 쿼터 기반 fallback: GLM 쿼터 소진 시 자동 Claude 전환
@@ -231,23 +244,26 @@ glm-plugin-cc/
 │   └── glm-proxy.js               CLI 진입점
 ├── src/
 │   ├── config.js                   설정 로드
-│   ├── router.js                   라우팅 결정 (7개 테스트)
+│   ├── router.js                   세션별 Map 기반 라우팅
 │   ├── proxy.js                    업스트림 파이핑 + OAuth 패스스루
-│   └── server.js                   HTTP 서버
-├── plugins/glm/                    플러그인 (statusline 유지)
+│   ├── server.js                   HTTP 서버 (/v1/messages, /_hint, /_status)
+│   └── classifier.js               CODE/OTHER 분류 (glm-4.7 via proxy)
+├── plugins/glm/
 │   ├── .claude-plugin/
 │   │   └── plugin.json
 │   ├── scripts/
-│   │   ├── glm-call.js             (Phase 2 정리 대상)
-│   │   └── statusline.js           쿼터 표시 (유지)
+│   │   └── statusline.js           쿼터 표시
+│   ├── hooks/
+│   │   ├── hooks.json              SessionStart + UserPromptSubmit 등록
+│   │   ├── session-start.js        프록시 자동 기동 + readiness 폴링
+│   │   └── route-hook.js           classify → /_hint POST
 │   └── skills/
-│       └── task/SKILL.md           (Phase 2 정리 대상)
+│       └── setup/SKILL.md          /glm:setup — settings.json 1회 구성
 ├── .claude-plugin/
 │   └── marketplace.json            마켓플레이스 메타
 ├── test/
-│   └── router.test.js              라우팅 규칙 테스트
+│   └── router.test.js              라우팅 규칙 테스트 (12개)
 ├── tests/
-│   ├── glm-call.test.js            (Phase 2 정리 대상)
 │   └── statusline.test.js
 ├── docs/
 │   └── DECISIONS.md                이 문서
@@ -262,10 +278,12 @@ glm-plugin-cc/
 
 ## 설정 레퍼런스
 
-### 프록시 실행
+### 프록시 실행 (수동 — 개발/디버깅용)
 ```bash
 GLM_API_KEY="..." node ~/Personal/glm-plugin-cc/bin/glm-proxy.js &
 ```
+
+일반 사용자는 `/glm:setup` 실행 후 SessionStart hook이 자동 기동.
 
 ### Claude Code 연결 (`~/.claude/settings.json`)
 ```json
@@ -273,12 +291,15 @@ GLM_API_KEY="..." node ~/Personal/glm-plugin-cc/bin/glm-proxy.js &
   "env": {
     "ANTHROPIC_BASE_URL": "http://localhost:4000",
     "GLM_API_KEY": "...",
+    "GLM_PROXY_PATH": "/path/to/bin/glm-proxy.js",
     "ANTHROPIC_CUSTOM_MODEL_OPTION": "glm-5.1",
     "ANTHROPIC_CUSTOM_MODEL_OPTION_NAME": "GLM-5.1",
     "ANTHROPIC_CUSTOM_MODEL_OPTION_DESCRIPTION": "Z.ai GLM-5.1 (routed via glm-proxy)"
   }
 }
 ```
+
+`GLM_PROXY_PATH`는 SessionStart hook이 프록시 기동에 사용. `/glm:setup`이 자동 주입.
 
 ### GLM API
 - Coding Plan 엔드포인트: `https://api.z.ai/api/anthropic/v1/messages`

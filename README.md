@@ -1,6 +1,26 @@
 # glm-plugin-cc
 
-Claude Code plugin for [GLM (Z.ai)](https://z.ai) integration — delegate coding tasks to GLM and monitor usage quotas.
+Claude Code plugin + local proxy for [GLM (Z.ai)](https://z.ai) integration. Auto-routes code-related prompts to GLM, everything else to Claude, within the same session.
+
+## How it works
+
+```
+User prompt
+  └─▶ UserPromptSubmit hook ─▶ classifier (glm-4.7) ─▶ "CODE" or "OTHER"
+                                                               │
+                                                               ▼
+                                     POST /_hint {session_id, backend}
+                                                               │
+                                                               ▼
+Claude Code ─▶ localhost:4000 (glm-proxy) ─▶ routes by:
+                                              1. model prefix (/model glm-5.1)
+                                              2. session-keyed hint (from hook)
+                                              3. default (Claude)
+```
+
+- Proxy runs in the background — started automatically on each Claude Code session via the `SessionStart` hook.
+- Routing hints are **keyed by `session_id`** so multiple Claude Code sessions don't cross-contaminate.
+- `/model glm-5.1` or `/model opus` always overrides the classifier.
 
 ## Installation
 
@@ -9,35 +29,34 @@ claude plugin marketplace add pyy0715/glm-plugin-cc
 claude plugin install glm@glm-plugin-cc
 ```
 
-## Setup
+## Setup (one-time)
 
-### 1. Set your GLM API key
-
-**Claude Code settings (recommended):**
-
-```json
-// ~/.claude/settings.json
-{
-  "env": {
-    "GLM_API_KEY": "your-api-key-here"
-  }
-}
-```
-
-**or Shell:**
-
-```bash
-# ~/.zshrc or ~/.bashrc
-export GLM_API_KEY="your-api-key-here"
-```
-
-### 2. Verify setup
+Inside Claude Code, run:
 
 ```
 /glm:setup
 ```
 
-### 3. (Optional) Configure statusline
+This writes the following to `~/.claude/settings.json` (merged into your existing `env`):
+
+- `ANTHROPIC_BASE_URL=http://localhost:4000` — routes API calls through the proxy
+- `GLM_API_KEY=<your Z.ai key>` — used by the proxy when routing to GLM
+- `GLM_PROXY_PATH=<absolute path to bin/glm-proxy.js>` — used by `SessionStart` hook to auto-start the proxy
+
+**Restart Claude Code after setup** (or try `/reload-plugins`). `ANTHROPIC_BASE_URL` is read once at startup.
+
+## Usage
+
+After setup, just use Claude Code normally:
+
+- Code-related prompts → classified as CODE → routed to GLM
+- Everything else → Claude
+- `/model glm-5.1` → forces GLM for the session
+- `/model opus` → forces Claude for the session
+
+Check `/tmp/glm-proxy.log` if you want to see routing decisions (set `GLM_DEBUG=1` for verbose logs).
+
+## Statusline (optional)
 
 Plugins cannot auto-register a statusline. Add manually to `~/.claude/settings.json`:
 
@@ -50,41 +69,46 @@ Plugins cannot auto-register a statusline. Add manually to `~/.claude/settings.j
 }
 ```
 
-> The path above assumes marketplace installation. Adjust if installed elsewhere.
-> `${CLAUDE_PLUGIN_ROOT}` does NOT work in settings.json — use an absolute path.
+Shows Claude 5-hour coding quota + GLM monthly MCP quota side-by-side.
 
-## Usage
+## Models
 
-### `/glm:task`
+Available GLM models: `glm-5.1`, `glm-5`, `glm-5-turbo`, `glm-4.7`, `glm-4.6`, `glm-4.5`, `glm-4.5-air`.
 
-Delegate any coding work to GLM. Auto-triggers on all coding requests.
+- GLM-5.1/5/5-Turbo: 3x quota peak, 2x off-peak
+- GLM-4.7: 1x quota (recommended for routine tasks)
 
-```
-/glm:task write a binary search function in Python
-/glm:task --model glm-5-turbo refactor this module
-```
+Register GLM in the `/model` picker by adding to `~/.claude/settings.json` (one model only):
 
-### `/glm:setup`
-
-Check API key configuration and show setup instructions.
-
-## Model Configuration
-
-Default model: `glm-5.1`
-
-Available models: `glm-5.1`, `glm-5`, `glm-5-turbo`, `glm-4.7`, `glm-4.6`, `glm-4.5`, `glm-4.5-air`
-
-Override per-call:
-
-```
-/glm:task --model glm-5-turbo "task description"
+```json
+{
+  "env": {
+    "ANTHROPIC_CUSTOM_MODEL_OPTION": "glm-5.1",
+    "ANTHROPIC_CUSTOM_MODEL_OPTION_NAME": "GLM-5.1",
+    "ANTHROPIC_CUSTOM_MODEL_OPTION_DESCRIPTION": "Z.ai GLM-5.1 (routed via glm-proxy)"
+  }
+}
 ```
 
-Override globally:
+## Troubleshooting
+
+- **First prompt after setup hangs or errors:** Claude Code didn't reread `ANTHROPIC_BASE_URL`. Quit and restart.
+- **`API error: 400 model: ... at most 256 characters`:** you have `"model": "glm-5.1"` as the default in settings.json but the proxy isn't running. Either start the proxy (`node bin/glm-proxy.js`) or remove the `"model"` line to default to Claude.
+- **Proxy port already in use:** set `PROXY_PORT=<other>` in `~/.claude/settings.json`'s `env`.
+- **See routing decisions:** `GLM_DEBUG=1` in the `env` block.
+
+## Advanced
+
+Manually running the proxy (for dev/debugging):
 
 ```bash
-export GLM_MODEL="glm-5-turbo"
+GLM_API_KEY=... node bin/glm-proxy.js
+# or with debug logs:
+GLM_DEBUG=1 GLM_API_KEY=... node bin/glm-proxy.js
 ```
 
-> GLM-5.1/5/5-Turbo consume 3x quota at peak hours, 2x off-peak (1x off-peak promo through April).
-> GLM-4.7 consumes 1x — recommended for routine tasks.
+For always-on proxy (runs even when `claude` isn't active), see `docs/DECISIONS.md` Phase 4 — `launchd`/`systemd` templates are on the roadmap.
+
+## Architecture
+
+See [`docs/DECISIONS.md`](docs/DECISIONS.md) for design decisions, verification results, and the full file map.
