@@ -128,6 +128,7 @@ Shows Claude 5-hour coding quota and GLM monthly MCP quota side-by-side.
 | `GLM_PROXY_PATH` | — | Absolute path to `bin/glm-proxy.js`, used by `SessionStart` hook |
 | `PROXY_PORT` | `4000` | Proxy listen port |
 | `DEFAULT_BACKEND` | `claude` | Final fallback when no hint and no prefix matches |
+| `GLM_ROUTED_MODEL` | `glm-5.1` | Model the proxy substitutes when routing to GLM with a non-`glm-*` request (i.e. classifier-driven routing of `claude-sonnet-*` / `claude-opus-*`). Set to `glm-4.7` if you want cheaper auto-routing. |
 | `GLM_PROXY_URL` | `http://localhost:4000` | Where the hook reaches the proxy |
 | `GLM_CLASSIFY_TIMEOUT_MS` | `5000` | Classifier fetch timeout |
 | `GLM_HINT_TTL_MS` | `60000` | How long a session hint stays valid |

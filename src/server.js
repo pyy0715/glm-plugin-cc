@@ -1,8 +1,87 @@
 // @ts-check
 import http from "node:http";
 import { forward } from "./proxy.js";
+import { rewriteModelForGlm } from "./rewrite.js";
 import { resolve, setHint } from "./router.js";
 import { stripAssistantThinking } from "./sanitize.js";
+
+const debugEnabled = () => Boolean(process.env.GLM_DEBUG);
+function debug(...args) {
+	if (debugEnabled()) console.log(...args);
+}
+
+function sendJson(res, status, payload) {
+	res.writeHead(status, { "content-type": "application/json" });
+	res.end(JSON.stringify(payload));
+}
+
+function handleHint(res, body) {
+	if (!body.session_id || !body.backend) {
+		sendJson(res, 400, { error: "missing session_id or backend field" });
+		return;
+	}
+	setHint(body.session_id, body.backend, body.ttl || 60_000);
+	sendJson(res, 200, {
+		ok: true,
+		session_id: body.session_id,
+		backend: body.backend,
+	});
+}
+
+function handleStatus(res, config) {
+	sendJson(res, 200, {
+		port: config.port,
+		defaultBackend: config.defaultBackend,
+		glmRoutedModel: config.glmRoutedModel,
+		backends: Object.keys(config.backends),
+	});
+}
+
+function handleProxy(req, res, body, bodyBuffer, config) {
+	const backend = resolve(body.model, body.metadata, config);
+	const inboundModel = body.model || "unknown";
+
+	const stripped = stripAssistantThinking(body);
+	let outboundBody = stripped.body;
+	let outboundModified = stripped.modified;
+	if (stripped.modified) {
+		debug("  stripped thinking blocks from assistant history");
+	}
+
+	if (backend.name === "glm") {
+		const rewritten = rewriteModelForGlm(outboundBody, {
+			targetModel: config.glmRoutedModel,
+		});
+		if (rewritten.modified) {
+			outboundBody = rewritten.body;
+			outboundModified = true;
+		}
+	}
+
+	const outboundModel = outboundBody?.model || inboundModel;
+	const sameModel = outboundModel === inboundModel;
+	const tag = sameModel ? "" : ` [${outboundModel}]`;
+	console.log(`[${new Date().toISOString()}] ${inboundModel} -> ${backend.name}${tag}`);
+	if (debugEnabled()) {
+		debug(
+			"  metadata:",
+			JSON.stringify(body.metadata),
+			"system:",
+			Array.isArray(body.system) ? `array[${body.system.length}]` : typeof body.system,
+		);
+	}
+
+	const outboundBuffer = outboundModified ? Buffer.from(JSON.stringify(outboundBody)) : bodyBuffer;
+	forward(req, res, backend, outboundBuffer);
+}
+
+function parseJsonOrEmpty(buffer) {
+	try {
+		return JSON.parse(buffer.toString());
+	} catch {
+		return {};
+	}
+}
 
 /**
  * Create the proxy server.
@@ -16,74 +95,21 @@ export function createServer(config) {
 		req.on("end", () => {
 			const bodyBuffer = Buffer.concat(chunks);
 
-			// POST /_hint — receive routing hint from hook
 			if (req.url === "/_hint" && req.method === "POST") {
 				try {
-					const hint = JSON.parse(bodyBuffer.toString());
-					if (!hint.session_id || !hint.backend) {
-						res.writeHead(400, { "content-type": "application/json" });
-						res.end(JSON.stringify({ error: "missing session_id or backend field" }));
-						return;
-					}
-					setHint(hint.session_id, hint.backend, hint.ttl || 60_000);
-					res.writeHead(200, { "content-type": "application/json" });
-					res.end(
-						JSON.stringify({
-							ok: true,
-							session_id: hint.session_id,
-							backend: hint.backend,
-						}),
-					);
+					handleHint(res, JSON.parse(bodyBuffer.toString()));
 				} catch {
-					res.writeHead(400, { "content-type": "application/json" });
-					res.end(JSON.stringify({ error: "invalid JSON" }));
+					sendJson(res, 400, { error: "invalid JSON" });
 				}
 				return;
 			}
 
-			// GET /_status — show current config
 			if (req.url === "/_status" && req.method === "GET") {
-				res.writeHead(200, { "content-type": "application/json" });
-				res.end(
-					JSON.stringify({
-						port: config.port,
-						defaultBackend: config.defaultBackend,
-						backends: Object.keys(config.backends),
-					}),
-				);
+				handleStatus(res, config);
 				return;
 			}
 
-			// Proxy all other requests
-			let body = {};
-			try {
-				body = JSON.parse(bodyBuffer.toString());
-			} catch {
-				// Non-JSON request — forward as-is
-			}
-
-			const backend = resolve(body.model, body.metadata, config);
-			const ts = new Date().toISOString();
-			console.log(`[${ts}] ${body.model || "unknown"} -> ${backend.name}`);
-			if (process.env.GLM_DEBUG) {
-				console.log(
-					"  metadata:",
-					JSON.stringify(body.metadata),
-					"system:",
-					Array.isArray(body.system) ? `array[${body.system.length}]` : typeof body.system,
-				);
-			}
-
-			// Strip cross-backend thinking blocks to avoid Anthropic's
-			// `Invalid signature in thinking block` when routing switches
-			// backends mid-session.
-			const { body: sanitized, modified } = stripAssistantThinking(body);
-			const outboundBuffer = modified ? Buffer.from(JSON.stringify(sanitized)) : bodyBuffer;
-			if (modified && process.env.GLM_DEBUG) {
-				console.log("  stripped thinking blocks from assistant history");
-			}
-
-			forward(req, res, backend, outboundBuffer);
+			handleProxy(req, res, parseJsonOrEmpty(bodyBuffer), bodyBuffer, config);
 		});
 	});
 }
