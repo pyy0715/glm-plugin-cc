@@ -46,7 +46,9 @@ Write the file back with 2-space indentation, matching the existing formatting.
 
 Tell the user, verbatim:
 
-> Setup complete. **Changes to `ANTHROPIC_BASE_URL` take effect only on a new Claude Code session.** Quit the current `claude` and restart it — the `SessionStart` hook will spawn the proxy automatically. Try `/reload-plugins` first if you prefer not to restart, but it may not re-apply environment variables; check `/tmp/glm-proxy.log` for incoming requests after your next prompt to confirm.
+> Setup complete. Claude Code re-applies `ANTHROPIC_BASE_URL` to running sessions immediately, so any open `claude` will fail with API errors until the proxy is up. `/exit` and `/resume` each running session — the `SessionStart` hook starts the proxy if it isn't already running.
+>
+> To confirm, check `/tmp/glm-proxy.log` after your next prompt — you should see routing lines like `claude-sonnet-4-6 -> claude` or `glm-4.7 -> glm`.
 
 ## Important constraints
 
