@@ -1,9 +1,14 @@
 // @ts-check
 import http from "node:http";
+import https from "node:https";
+import { createSseDetector, isContextLimitByStopReason, isContextLimitError } from "./fallback.js";
 import { forward } from "./proxy.js";
 import { rewriteModelForGlm } from "./rewrite.js";
 import { resolve, setHint } from "./router.js";
 import { stripAssistantThinking } from "./sanitize.js";
+
+const NON_STREAM_BUFFER_LIMIT = 1024 * 1024; // 1 MB — full response capture
+const STREAM_PEEK_LIMIT = 64 * 1024; // 64 KB worth of SSE prelude is plenty
 
 const debugEnabled = () => Boolean(process.env.GLM_DEBUG);
 function debug(...args) {
@@ -35,6 +40,224 @@ function handleStatus(res, config) {
 		glmRoutedModel: config.glmRoutedModel,
 		backends: Object.keys(config.backends),
 	});
+}
+
+function buildHeaders(backend, sourceHeaders, bodyLength, hostname) {
+	/** @type {Record<string, string | string[] | undefined>} */
+	let headers;
+	if (backend.name === "claude") {
+		headers = { ...sourceHeaders };
+	} else {
+		const { authorization: _, ...rest } = sourceHeaders;
+		headers = { ...rest, "x-api-key": backend.apiKey };
+	}
+	headers.host = hostname;
+	headers["anthropic-version"] = headers["anthropic-version"] || "2023-06-01";
+	headers["content-length"] = String(bodyLength);
+	return headers;
+}
+
+function buildFallbackBuffer(outboundBody, inboundModel) {
+	const { model: _dropped, ...rest } = outboundBody ?? {};
+	const restored = inboundModel ? { ...rest, model: inboundModel } : rest;
+	return Buffer.from(JSON.stringify(restored));
+}
+
+function parseMaybeJson(buffer) {
+	try {
+		return JSON.parse(buffer.toString());
+	} catch {
+		return null;
+	}
+}
+
+function writeBufferedResponse(clientRes, statusCode, headers, bodyBuffer) {
+	clientRes.writeHead(statusCode, headers);
+	clientRes.end(bodyBuffer);
+}
+
+function forwardToClaude(clientReq, clientRes, config, outboundBody, inboundModel, reason) {
+	const fallbackBuffer = buildFallbackBuffer(outboundBody, inboundModel);
+	console.log(`[ctx-fallback] ${inboundModel || "unknown"} -> claude (${reason})`);
+	forward(clientReq, clientRes, config.backends.claude, fallbackBuffer);
+}
+
+function glmRequestOptions(clientReq, backend, outboundBuffer) {
+	const url = new URL(backend.baseUrl + clientReq.url);
+	const proto = url.protocol === "https:" ? https : http;
+	return {
+		proto,
+		options: {
+			hostname: url.hostname,
+			port: url.port || (url.protocol === "https:" ? 443 : 80),
+			path: url.pathname,
+			method: clientReq.method,
+			headers: buildHeaders(backend, clientReq.headers, outboundBuffer.length, url.hostname),
+		},
+	};
+}
+
+function handleGlmUpstreamError(clientRes) {
+	return (err) => {
+		if (!clientRes.headersSent) {
+			sendJson(clientRes, 502, {
+				error: { message: `Upstream error: ${err.message}` },
+			});
+		}
+	};
+}
+
+function tryGlmNonStreaming(
+	clientReq,
+	clientRes,
+	outboundBody,
+	outboundBuffer,
+	inboundModel,
+	config,
+) {
+	const backend = config.backends.glm;
+	const { proto, options } = glmRequestOptions(clientReq, backend, outboundBuffer);
+
+	const upstream = proto.request(options, (upstreamRes) => {
+		const status = upstreamRes.statusCode || 502;
+		const chunks = [];
+		let total = 0;
+		let truncated = false;
+
+		upstreamRes.on("data", (chunk) => {
+			total += chunk.length;
+			if (total > NON_STREAM_BUFFER_LIMIT) {
+				truncated = true;
+				return;
+			}
+			chunks.push(chunk);
+		});
+
+		upstreamRes.on("end", () => {
+			const bodyBuf = Buffer.concat(chunks);
+			if (truncated) {
+				writeBufferedResponse(clientRes, status, upstreamRes.headers, bodyBuf);
+				return;
+			}
+			const parsed = parseMaybeJson(bodyBuf);
+
+			if (isContextLimitError(status, parsed)) {
+				const snippet = String(parsed?.error?.message || "").slice(0, 80);
+				forwardToClaude(
+					clientReq,
+					clientRes,
+					config,
+					outboundBody,
+					inboundModel,
+					`glm 400: ${snippet}`,
+				);
+				return;
+			}
+			if (status === 200 && isContextLimitByStopReason(parsed)) {
+				forwardToClaude(
+					clientReq,
+					clientRes,
+					config,
+					outboundBody,
+					inboundModel,
+					"glm 200 stop_reason: model_context_window_exceeded",
+				);
+				return;
+			}
+			if (status >= 400 && parsed?.error?.message) {
+				console.log(`  glm ${status} (no fallback): ${String(parsed.error.message).slice(0, 160)}`);
+			}
+			writeBufferedResponse(clientRes, status, upstreamRes.headers, bodyBuf);
+		});
+	});
+
+	upstream.on("error", handleGlmUpstreamError(clientRes));
+	upstream.write(outboundBuffer);
+	upstream.end();
+}
+
+function tryGlmStreaming(clientReq, clientRes, outboundBody, outboundBuffer, inboundModel, config) {
+	const backend = config.backends.glm;
+	const { proto, options } = glmRequestOptions(clientReq, backend, outboundBuffer);
+
+	const upstream = proto.request(options, (upstreamRes) => {
+		const status = upstreamRes.statusCode || 502;
+
+		if (status !== 200) {
+			const chunks = [];
+			upstreamRes.on("data", (c) => chunks.push(c));
+			upstreamRes.on("end", () => {
+				const bodyBuf = Buffer.concat(chunks);
+				const parsed = parseMaybeJson(bodyBuf);
+				if (isContextLimitError(status, parsed)) {
+					const snippet = String(parsed?.error?.message || "").slice(0, 80);
+					forwardToClaude(
+						clientReq,
+						clientRes,
+						config,
+						outboundBody,
+						inboundModel,
+						`glm 400: ${snippet}`,
+					);
+					return;
+				}
+				writeBufferedResponse(clientRes, status, upstreamRes.headers, bodyBuf);
+			});
+			return;
+		}
+
+		const detector = createSseDetector();
+		const prelude = [];
+		let preludeBytes = 0;
+		let committed = false;
+
+		function commitPassthrough() {
+			if (committed) return;
+			committed = true;
+			clientRes.writeHead(200, upstreamRes.headers);
+			for (const chunk of prelude) clientRes.write(chunk);
+			upstreamRes.pipe(clientRes);
+		}
+
+		upstreamRes.on("data", (chunk) => {
+			if (committed) return;
+			const asString = chunk.toString("utf8");
+			const verdict = detector.feed(asString);
+
+			if (verdict === "context_exceeded") {
+				upstreamRes.destroy();
+				forwardToClaude(
+					clientReq,
+					clientRes,
+					config,
+					outboundBody,
+					inboundModel,
+					"glm stream stop_reason: model_context_window_exceeded",
+				);
+				return;
+			}
+
+			prelude.push(chunk);
+			preludeBytes += chunk.length;
+
+			if (verdict === "normal" || preludeBytes > STREAM_PEEK_LIMIT) {
+				commitPassthrough();
+			}
+		});
+
+		upstreamRes.on("end", () => {
+			if (!committed) commitPassthrough();
+		});
+		upstreamRes.on("error", () => {
+			if (!committed && !clientRes.headersSent) {
+				sendJson(clientRes, 502, { error: { message: "upstream stream error" } });
+			}
+		});
+	});
+
+	upstream.on("error", handleGlmUpstreamError(clientRes));
+	upstream.write(outboundBuffer);
+	upstream.end();
 }
 
 function handleProxy(req, res, body, bodyBuffer, config) {
@@ -72,6 +295,17 @@ function handleProxy(req, res, body, bodyBuffer, config) {
 	}
 
 	const outboundBuffer = outboundModified ? Buffer.from(JSON.stringify(outboundBody)) : bodyBuffer;
+
+	if (backend.name === "glm") {
+		const isStream = body?.stream === true;
+		if (isStream) {
+			tryGlmStreaming(req, res, outboundBody, outboundBuffer, body.model, config);
+		} else {
+			tryGlmNonStreaming(req, res, outboundBody, outboundBuffer, body.model, config);
+		}
+		return;
+	}
+
 	forward(req, res, backend, outboundBuffer);
 }
 

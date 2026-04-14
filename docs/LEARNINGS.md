@@ -205,18 +205,37 @@ proxy는 `upstreamRes.pipe(clientRes)`로 바디 스트리밍. 별도 처리 없
 - System prompt 분리, 프롬프트 앞 2000자로 자름
 - 5초 timeout, 실패 시 `null` 반환 → hint 미전송 → default 백엔드 사용
 
-### 7.2 관찰된 분류 정확도
+### 7.2 Few-shot bias 사건 (2026-04-14)
 
-- `write a python function to reverse a string` → CODE ✅
-- `프랑스 수도가 어디야?` → OTHER ✅
-- `hello`, `test` → OTHER ✅
+**증상**: "이전 프롬프트 확인해 계속 에러나잖아", "에러나는데" 같은 단순 불평 프롬프트가 모두 **CODE로 오분류** → GLM 라우팅 → GLM context 초과로 사용자 에러.
 
-한국어 프롬프트도 잘 판별함.
+**진단**: `scripts/verify-classifier.js` 격리 테스트로 재현. Few-shot에서 `"이 스택 트레이스 왜 NullPointerException 나는거야?" → CODE` 예시가 "에러"라는 키워드를 CODE 쪽으로 끌어당기는 어휘 편향 유발. Zero-shot(예시 없음)으로만 같은 입력 보내면 OTHER로 정분류되어 few-shot이 오히려 정확도를 **떨어뜨렸음** 확인.
 
-### 7.3 지연
+**해결**: Anthropic 공식 가이드(`platform.claude.com/docs/en/build-with-claude/prompt-engineering`) 기반 재설계.
+
+- **XML rules** (`<task>`, `<rules>`) — system prompt에 운영 정의 명시, "tie-breaker: when in doubt OTHER" 한 줄
+- **5-shot with balanced vocabulary** — CODE 2 / OTHER 3. "에러" 같은 키워드가 **양쪽 모두에** 등장하도록 설계:
+  - CODE 쪽: "왜 이 함수 NullPointerException 나는지 고쳐줘" (기술 어휘 + 액션 동사)
+  - OTHER 쪽: "에러 계속 나서 짜증나네" (불평만), "방금 뭐라고 했어?" (prior-turn 메타)
+- **운영 정의 보강** — "how do I do X with a command" 같은 정보 요청도 CODE로 명시 (git/shell 도메인)
+
+### 7.3 검증 자동화
+
+`scripts/verify-classifier.js` — 17 케이스 (이전 오분류 복구 + 회귀 방어) 자동 실행. 50ms 간격 sleep + null 응답에 1회 retry 포함. `npm test`에 포함 X (live API 호출, GLM 쿼터 소모). 새 classifier 변경 시 이 스크립트로 검증.
+
+결과 (2026-04-14 튜닝 3라운드 후): **17/17 pass**.
+
+### 7.4 지연
 
 - Warm: 600-900ms
-- Cold (첫 호출): 더 느릴 수 있음 — Turn 1 anomaly의 잠재 원인?
+- Cold: 더 느릴 수 있음 (이전에 관찰된 14ms anomaly의 간접 원인 후보)
+
+### 7.5 비대칭 안전성 원칙
+
+잘못 CODE로 분류 (OTHER→GLM) = GLM context 초과 위험 + 낭비된 GLM 호출 1회 (fallback이 흡수).
+잘못 OTHER로 분류 (CODE→Claude) = 기능적 문제 없음 (Claude가 GLM 할 일을 대신 처리).
+
+→ 애매하면 OTHER가 경제적으로 안전. Rules의 tie-breaker에 명시됨.
 
 ---
 
@@ -316,7 +335,25 @@ messages.1.content.0: Invalid `signature` in `thinking` block
 - 테스트: `test/sanitize.test.js` (9 케이스)
 - `GLM_DEBUG=1`이면 스트립 발생 시 `stripped thinking blocks from assistant history` 로그
 
-### 10.3 `/reload-plugins` 단독 효과
+### 10.3 Z.ai의 context overflow 표기 방식 (해결됨)
+
+**발견 (2026-04-14)**: Z.ai Anthropic-compatible 엔드포인트는 context window 초과를 **400 `invalid_request_error`로 주지 않음**. 대신:
+
+- **Non-streaming**: `status=200` + body `{"content":[], "stop_reason":"model_context_window_exceeded","usage":{"input_tokens":0,"output_tokens":0}}`
+- **Streaming (SSE)**: `message_start` → `message_delta` (`delta.stop_reason=model_context_window_exceeded`) → `message_stop`. content_block_start 이벤트가 **없음** (모델이 응답 생성을 시작도 안 함).
+
+Claude Code가 사용자에게 보여주는 "The model has reached its context window limit" 에러는 클라이언트가 이 stop_reason을 보고 생성한 메시지.
+
+**해결**: proxy에 양방향 fallback 추가 (`src/fallback.js` + `src/server.js`의 `tryGlmNonStreaming` / `tryGlmStreaming`).
+
+- Non-streaming: upstream body 전체 버퍼링(1MB 상한) → `isContextLimitByStopReason` → true면 Claude fallback
+- Streaming: upstream SSE를 64KB까지 버퍼링하며 `createSseDetector()`로 초기 이벤트 스캔 → `context_exceeded` 판정 시 버퍼 폐기 + Claude 재요청, `normal` 판정 시 버퍼 flush + pipe
+- Fallback 전 body.model을 원본 inbound로 복원 (rewrite된 `glm-5.1`을 Claude가 거부 안 하게)
+- 400 경로는 여전히 이중 안전망으로 유지 (Anthropic 직접 요청 대비)
+
+로그: `[ctx-fallback] <inboundModel> -> claude (glm 200 stop_reason: model_context_window_exceeded)`
+
+### 10.4 `/reload-plugins` 단독 효과
 
 BASE_URL 재적용이 `/reload-plugins` 없이도 일어나는 건 실증함. `/reload-plugins`가 **추가로** 어떤 env를 재읽는지는 미검증.
 

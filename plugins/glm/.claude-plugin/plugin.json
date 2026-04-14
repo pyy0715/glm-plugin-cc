@@ -1,6 +1,6 @@
 {
 	"name": "glm",
-	"version": "0.3.0",
+	"version": "0.4.0",
 	"description": "GLM (Z.ai) integration for Claude Code — local proxy with session-keyed auto-routing (CODE prompts to GLM, everything else to Claude).",
 	"author": {
 		"name": "pyy0715"
