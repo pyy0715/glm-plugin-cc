@@ -268,8 +268,10 @@ glm-plugin-cc/
 ├── .claude-plugin/
 │   └── marketplace.json            마켓플레이스 메타
 ├── test/
-│   └── router.test.js              라우팅 규칙 테스트 (12개)
-├── tests/
+│   ├── router.test.js              세션별 힌트 라우팅 테스트
+│   ├── sanitize.test.js            thinking block strip
+│   ├── rewrite.test.js             model rewrite
+│   ├── fallback.test.js            context-limit 판정 + SSE detector
 │   └── statusline.test.js
 ├── docs/
 │   └── DECISIONS.md                이 문서
