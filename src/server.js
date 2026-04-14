@@ -2,6 +2,7 @@
 import http from "node:http";
 import { forward } from "./proxy.js";
 import { resolve, setHint } from "./router.js";
+import { stripAssistantThinking } from "./sanitize.js";
 
 /**
  * Create the proxy server.
@@ -73,7 +74,16 @@ export function createServer(config) {
 				);
 			}
 
-			forward(req, res, backend, bodyBuffer);
+			// Strip cross-backend thinking blocks to avoid Anthropic's
+			// `Invalid signature in thinking block` when routing switches
+			// backends mid-session.
+			const { body: sanitized, modified } = stripAssistantThinking(body);
+			const outboundBuffer = modified ? Buffer.from(JSON.stringify(sanitized)) : bodyBuffer;
+			if (modified && process.env.GLM_DEBUG) {
+				console.log("  stripped thinking blocks from assistant history");
+			}
+
+			forward(req, res, backend, outboundBuffer);
 		});
 	});
 }

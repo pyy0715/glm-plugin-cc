@@ -14,7 +14,7 @@ function log(phase, extra = "") {
 	const dt = Date.now() - START;
 	fs.appendFileSync(
 		DEBUG_LOG,
-		`[${new Date().toISOString()}] +${dt}ms ${phase}${extra ? " " + extra : ""}\n`,
+		`[${new Date().toISOString()}] +${dt}ms ${phase}${extra ? ` ${extra}` : ""}\n`,
 	);
 }
 
@@ -33,10 +33,7 @@ async function main() {
 		return;
 	}
 	const { prompt, session_id } = data;
-	log(
-		"stdin-parsed",
-		`session_id=${session_id ?? "null"} prompt_len=${prompt?.length ?? 0}`,
-	);
+	log("stdin-parsed", `session_id=${session_id ?? "null"} prompt_len=${prompt?.length ?? 0}`);
 	if (!prompt || !session_id) return;
 
 	log("classify-start");
