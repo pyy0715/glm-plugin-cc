@@ -227,16 +227,18 @@ Z.ai 공식 플러그인(`zai-org/zai-coding-plugins`)에서 확인:
 - [x] `plugins/glm/hooks/session-start.js` — 프록시 자동 기동 + readiness 폴링
 - [x] `plugins/glm/hooks/hooks.json` — hook 등록
 - [x] `plugins/glm/skills/setup/SKILL.md` — `/glm:setup`
+- [x] `/reload-plugins`가 env var 재적용하는지 실증 검증 — Claude Code가 `ANTHROPIC_BASE_URL`을 **자동으로** 러닝 세션에 재적용함 (`/reload-plugins` 없이도). LEARNINGS.md 2.2 참조.
 - [ ] 분류 정확도 테스트 + 프롬프트 튜닝 (실사용 피드백 기반)
 - [ ] 지연 측정 (hook 전체 ~500ms 허용 범위 확인)
-- [ ] `/reload-plugins`가 env var 재적용하는지 실증 검증
 
-### Phase 4 — 추가 기능
-- [ ] (선택) launchd plist + systemd user service 템플릿 — claude 미가동 시에도 프록시 상시 운영용
+### Phase 4 — 추가 기능 (검토 중)
 - [ ] `ANTHROPIC_CUSTOM_MODEL_OPTION`으로 GLM 모델 여러 개 추가 가능한지 확인 (현재 1개 제한)
 - [ ] 모델 자동 라우팅: GLM-5.1 (복잡), GLM-4.7 (일반) 자동 선택
 - [ ] 쿼터 기반 fallback: GLM 쿼터 소진 시 자동 Claude 전환
 - [ ] statusline을 프록시에 통합하는 방안 검토
+
+**제거된 항목:**
+- ~~launchd plist + systemd user service 템플릿~~ — SessionStart hook이 claude 열 때마다 proxy를 자동 기동하고, proxy는 한 번 뜨면 reboot 전까지 살아있음. Claude Code 외 용도로 proxy를 쓸 일이 없어 별도 daemon 관리 불필요하다고 판단.
 
 ---
 

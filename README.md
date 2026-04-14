@@ -146,7 +146,7 @@ GLM_API_KEY=... node bin/glm-proxy.js
 GLM_DEBUG=1 GLM_API_KEY=... node bin/glm-proxy.js
 ```
 
-For always-on (proxy runs even when `claude` isn't active): `launchd` / `systemd` templates are on the roadmap — see `docs/DECISIONS.md` Phase 4. Until then, the `SessionStart` hook covers the common case.
+The proxy process stays up until you reboot or kill it, so after the first `claude` session spawns it via `SessionStart`, subsequent sessions reuse it. No separate daemon setup is needed.
 
 ## Architecture and design decisions
 
