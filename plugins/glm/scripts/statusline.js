@@ -1,15 +1,63 @@
 #!/usr/bin/env node
 
 import fs from "node:fs";
+import net from "node:net";
 import path from "node:path";
 
 const QUOTA_URL = "https://api.z.ai/api/monitor/usage/quota/limit";
 const CACHE_TTL_MS = 60_000;
+const PROXY_PORT = Number(process.env.PROXY_PORT || 4000);
+const PROXY_PROBE_TIMEOUT_MS = 300;
 
 const GREEN = "\x1b[32m";
 const YELLOW = "\x1b[33m";
 const RED = "\x1b[31m";
+const RED_BOLD = "\x1b[1;31m";
 const RESET = "\x1b[0m";
+
+function probePort(port) {
+	return new Promise((resolve) => {
+		const sock = net.createConnection(port, "127.0.0.1");
+		const timer = setTimeout(() => {
+			sock.destroy();
+			resolve(false);
+		}, PROXY_PROBE_TIMEOUT_MS);
+		sock.on("connect", () => {
+			clearTimeout(timer);
+			sock.destroy();
+			resolve(true);
+		});
+		sock.on("error", () => {
+			clearTimeout(timer);
+			resolve(false);
+		});
+	});
+}
+
+// Claude Code refreshes statusline roughly every 300ms. Cache the TCP probe
+// for a second so we're not burning a syscall per render.
+const PROXY_PROBE_CACHE_TTL_MS = 1000;
+async function checkProxyAlive(port, cacheDir) {
+	if (!cacheDir) return probePort(port);
+	const cachePath = path.join(cacheDir, "glm_proxy_alive.json");
+	try {
+		const raw = fs.readFileSync(cachePath, "utf8");
+		const cached = JSON.parse(raw);
+		if (cached.port === port && Date.now() - cached._ts < PROXY_PROBE_CACHE_TTL_MS) {
+			return cached.alive;
+		}
+	} catch {
+		// miss → probe
+	}
+	const alive = await probePort(port);
+	try {
+		fs.mkdirSync(cacheDir, { recursive: true });
+		fs.writeFileSync(cachePath, JSON.stringify({ port, alive, _ts: Date.now() }));
+	} catch {
+		// non-fatal
+	}
+	return alive;
+}
 
 function colorize(pct) {
 	if (pct >= 85) return RED;
@@ -86,6 +134,14 @@ process.stdin.on("end", async () => {
 	}
 
 	const parts = [];
+	// CLAUDE_PLUGIN_DATA is only set in plugin hook context, not in statusLine.
+	// Fall back to /tmp for cache when run from settings.json statusLine command.
+	const cacheDir = process.env.CLAUDE_PLUGIN_DATA || "/tmp";
+
+	// Proxy liveness probe (cached 1s). The indicator is appended at the tail
+	// so the primary quota signals read first; bold-red differentiates it
+	// from the non-bold RED used by quota gauges at ≥85%.
+	const proxyAlive = await checkProxyAlive(PROXY_PORT, cacheDir);
 
 	// Claude section: 5h usage + reset time
 	const rl = input.rate_limits;
@@ -99,9 +155,6 @@ process.stdin.on("end", async () => {
 	}
 
 	// GLM section
-	// CLAUDE_PLUGIN_DATA is only set in plugin hook context, not in statusLine.
-	// Fall back to /tmp for cache when run from settings.json statusLine command.
-	const cacheDir = process.env.CLAUDE_PLUGIN_DATA || "/tmp";
 	const glm = await loadGlmQuota(cacheDir);
 	if (glm) {
 		const stale = glm._stale ? "!" : "";
@@ -117,6 +170,8 @@ process.stdin.on("end", async () => {
 			parts.push(`glm[${level}] --`);
 		}
 	}
+
+	if (!proxyAlive) parts.push(`${RED_BOLD}proxy down${RESET}`);
 
 	process.stdout.write(parts.join(" | "));
 });

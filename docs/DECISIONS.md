@@ -251,7 +251,7 @@ Z.ai 공식 플러그인(`zai-org/zai-coding-plugins`)에서 확인:
 ### 미완 (실사용 피드백 후 판단)
 - [ ] 분류 정확도 튜닝 — `scripts/verify-classifier.js`에 한국어 + reason-annotated 규칙 회귀 케이스 추가
 - [ ] Hook 전체 지연 측정 (현재 ~700-900ms 추정, 사용감 영향 미미)
-- [ ] 프록시 다운 시 graceful fallback (현재는 ECONNREFUSED → Claude Code 에러)
+- [x] 프록시 다운 시 graceful fallback — UserPromptSubmit hook이 매 턴 `ensureProxyRunning()` 호출로 자동 복구, statusline에 DOWN 가시화 (§8 반응형 세션 블록과 별개로 LEARNINGS §10.6에 기록)
 - [ ] 모델 전환 지연(~20초) 원인 조사
 
 ### 후속 기능 후보 (필요해지면)
@@ -286,9 +286,10 @@ glm-plugin-cc/
 │   │   └── statusline.js           쿼터 표시
 │   ├── hooks/
 │   │   ├── hooks.json              SessionStart + UserPromptSubmit 등록
-│   │   ├── session-start.js        프록시 자동 기동 + readiness 폴링
+│   │   ├── proxy-lifecycle.js      checkPort/waitReady/spawnProxy/ensureProxyRunning (공유)
+│   │   ├── session-start.js        세션 시작 시 ensureProxyRunning() 호출
 │   │   ├── classifier.js           CODE/OTHER 분류 (glm-4.7 via proxy)
-│   │   └── route-hook.js           classify → /_hint POST
+│   │   └── route-hook.js           ensureProxyRunning → classify → /_hint POST
 │   └── skills/
 │       └── setup/SKILL.md          /glm:setup — settings.json 1회 구성
 ├── .claude-plugin/
@@ -298,6 +299,7 @@ glm-plugin-cc/
 │   ├── sanitize.test.js            thinking block strip
 │   ├── rewrite.test.js             model rewrite
 │   ├── fallback.test.js            context-limit 판정 + SSE detector
+│   ├── proxy-lifecycle.test.js     checkPort/waitReady/ensureProxyRunning
 │   └── statusline.test.js
 ├── docs/
 │   └── DECISIONS.md                이 문서
