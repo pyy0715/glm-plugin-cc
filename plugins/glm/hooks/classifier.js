@@ -5,7 +5,7 @@
 // OTHER = everything else, including explanation/advice/chat about code
 // (→ Claude). English-only prompt (glm-4.7 handles multilingual input at
 // runtime). Keyword bias guarded by showing "error", "kubectl", "git" on
-// both sides of the few-shot. See docs/LEARNINGS.md §7 for the history.
+// both sides of the few-shot. See docs/OPERATIONS.md §7 for the history.
 
 const SYSTEM_PROMPT = [
 	"<task>",

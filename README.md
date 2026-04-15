@@ -52,7 +52,7 @@ Two axes where this plugin is uniquely positioned:
 - **Depends on Anthropic OAuth token shape.** Claude Code's auth header format can change; the proxy just passes it through, but if the shape changes dramatically we'd need to adapt.
 - **First context-overflow turn per session is unavoidable.** The reactive block learns from GLM's actual rejection — the first overflowing turn still makes one wasted GLM call before the proxy knows to skip it. Every subsequent turn in that session is saved.
 - **Relies on Claude Code internals that aren't public API.** `body.metadata.user_id` stringified JSON, the `[1m]` suffix that signals 1M context, internal `claude-haiku-*` for plumbing. Confirmed empirically (and via the `ultraworkers/claw-code` leak); may drift across Claude Code releases.
-- **Hook race on proxy respawn.** If the proxy is dead *and* Claude Code exhibits the UserPromptSubmit blocking anomaly (see `docs/LEARNINGS.md` §3.2), the respawn may complete after the main API request has already fired — that one turn still 502s, next turn recovers. Statusline shows the state.
+- **Hook race on proxy respawn.** If the proxy is dead *and* Claude Code exhibits the UserPromptSubmit blocking anomaly (see [`docs/OPERATIONS.md`](docs/OPERATIONS.md#32-execution-timing) §3.2), the respawn may complete after the main API request has already fired — that one turn still 502s, next turn recovers. Statusline shows the state.
 - **Local-only, single-user.** No remote/team proxy, no shared-credential scheme. By design (ToS, privacy).
 - **No automatic Windows/WSL path resolution** in `/glm:setup`. If you're on a non-standard install, you'll be asked for `GLM_PROXY_PATH` manually.
 
@@ -201,5 +201,5 @@ The proxy process stays up until you reboot or kill it, so after the first `clau
 
 ## Architecture and design decisions
 
-- [`docs/DECISIONS.md`](docs/DECISIONS.md) — what I chose and why (proxy vs skill, routing priority, OAuth passthrough, litellm-avoidance, reactive session block). Currently in Korean.
-- [`docs/LEARNINGS.md`](docs/LEARNINGS.md) — empirically observed facts and pitfalls (plugin cache keying, `ANTHROPIC_BASE_URL` re-application, thinking-block signatures, Z.ai's `200 OK + stop_reason` overflow signaling, orphan log inodes). Currently in Korean.
+- [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — design rationale: proxy vs skill, routing priority, OAuth passthrough, why no LiteLLM, reactive session block, dead-proxy recovery, related work.
+- [`docs/OPERATIONS.md`](docs/OPERATIONS.md) — runtime facts and debugging: plugin cache keying, `ANTHROPIC_BASE_URL` re-application, thinking-block signatures, Z.ai's `200 OK + stop_reason` overflow signaling, orphan log inodes, dev loop, debugging checklist.
