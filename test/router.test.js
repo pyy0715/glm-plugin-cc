@@ -1,6 +1,13 @@
 import { strict as assert } from "node:assert";
 import { beforeEach, describe, it } from "node:test";
-import { clearHints, resolve, setHint } from "../src/router.js";
+import {
+	clearBlockedSessions,
+	clearHints,
+	isSessionBlocked,
+	markSessionBlocked,
+	resolve,
+	setHint,
+} from "../src/router.js";
 
 const config = {
 	port: 4000,
@@ -23,7 +30,10 @@ function metaFor(sessionId) {
 }
 
 describe("router", () => {
-	beforeEach(() => clearHints());
+	beforeEach(() => {
+		clearHints();
+		clearBlockedSessions();
+	});
 
 	it("routes glm-* models to GLM", () => {
 		const backend = resolve("glm-5.1", undefined, config);
@@ -118,5 +128,60 @@ describe("router", () => {
 		setHint("sessA", "nonexistent-backend");
 		const backend = resolve("some-model", metaFor("sessA"), config);
 		assert.equal(backend.name, "claude");
+	});
+
+	describe("session blocking (reactive overflow learning)", () => {
+		it("blocked session with glm hint routes to Claude", () => {
+			setHint("sessA", "glm");
+			markSessionBlocked("sessA");
+			const backend = resolve("claude-opus-4-6[1m]", metaFor("sessA"), config);
+			assert.equal(backend.name, "claude");
+		});
+
+		it("block overrides explicit glm-* model", () => {
+			markSessionBlocked("sessA");
+			const backend = resolve("glm-5.1", metaFor("sessA"), config);
+			assert.equal(backend.name, "claude");
+		});
+
+		it("block does not affect sessions without glm target", () => {
+			// No hint, no glm-* model — blocking is irrelevant, follows default path
+			markSessionBlocked("sessA");
+			const backend = resolve("claude-opus-4-6[1m]", metaFor("sessA"), config);
+			assert.equal(backend.name, "claude");
+		});
+
+		it("block is isolated per session", () => {
+			setHint("sessA", "glm");
+			setHint("sessB", "glm");
+			markSessionBlocked("sessA");
+			const a = resolve("claude-opus-4-6", metaFor("sessA"), config);
+			const b = resolve("claude-opus-4-6", metaFor("sessB"), config);
+			assert.equal(a.name, "claude");
+			assert.equal(b.name, "glm");
+		});
+
+		it("expired block auto-clears and allows GLM again", () => {
+			setHint("sessA", "glm");
+			markSessionBlocked("sessA", 1); // 1ms TTL
+			const start = Date.now();
+			while (Date.now() - start < 5) {} // busy wait 5ms
+			const backend = resolve("claude-opus-4-6", metaFor("sessA"), config);
+			assert.equal(backend.name, "glm");
+			assert.equal(isSessionBlocked("sessA"), false);
+		});
+
+		it("clearBlockedSessions() resets all", () => {
+			markSessionBlocked("sessA");
+			markSessionBlocked("sessB");
+			clearBlockedSessions();
+			assert.equal(isSessionBlocked("sessA"), false);
+			assert.equal(isSessionBlocked("sessB"), false);
+		});
+
+		it("markSessionBlocked is a no-op for empty sessionId", () => {
+			markSessionBlocked("");
+			assert.equal(isSessionBlocked(""), false);
+		});
 	});
 });

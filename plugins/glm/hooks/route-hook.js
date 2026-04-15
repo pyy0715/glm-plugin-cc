@@ -2,6 +2,7 @@
 // @ts-check
 import fs from "node:fs";
 import { classify } from "./classifier.js";
+import { PORT, ensureProxyRunning } from "./proxy-lifecycle.js";
 
 const PROXY_URL = process.env.GLM_PROXY_URL || "http://localhost:4000";
 const CLASSIFIER_TIMEOUT = Number(process.env.GLM_CLASSIFY_TIMEOUT_MS || 5000);
@@ -35,6 +36,14 @@ async function main() {
 	const { prompt, session_id } = data;
 	log("stdin-parsed", `session_id=${session_id ?? "null"} prompt_len=${prompt?.length ?? 0}`);
 	if (!prompt || !session_id) return;
+
+	// Proxy may have been killed mid-session (dev reload, OS reboot recovery,
+	// log cleanup, etc). If down, respawn before we depend on it for classify
+	// and /_hint. Healthy proxies pay only a ~1-5ms TCP probe here.
+	log("proxy-health-start");
+	const state = await ensureProxyRunning({ port: PORT });
+	log("proxy-health-done", `state=${state}`);
+	if (state === "unreachable" || state === "missing-path") return;
 
 	log("classify-start");
 	const result = await classify(prompt, {

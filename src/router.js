@@ -9,6 +9,16 @@
 /** @type {Map<string, Hint>} */
 const hints = new Map();
 
+/** @type {Map<string, number>} sessionId → expiresAt (ms epoch) */
+const blockedSessions = new Map();
+
+// Default block TTL: long enough to survive a burst of turns after overflow,
+// short enough that /clear or /compact eventually gets a retry window.
+export const DEFAULT_BLOCK_TTL_MS = (() => {
+	const v = Number.parseInt(process.env.GLM_BLOCK_TTL_MS || "", 10);
+	return Number.isFinite(v) && v > 0 ? v : 10 * 60_000;
+})();
+
 /**
  * Store a session-scoped routing hint. Also GCs expired entries.
  * @param {string} sessionId
@@ -27,9 +37,48 @@ export function clearHints() {
 	hints.clear();
 }
 
+/**
+ * Remember that GLM already rejected this session for context overflow, so
+ * subsequent GLM-bound turns can skip the wasted round-trip and go straight
+ * to Claude. TTL lets /clear or /compact eventually re-enable GLM.
+ * @param {string} sessionId
+ * @param {number} [ttlMs=DEFAULT_BLOCK_TTL_MS]
+ */
+export function markSessionBlocked(sessionId, ttlMs = DEFAULT_BLOCK_TTL_MS) {
+	if (!sessionId) return;
+	blockedSessions.set(sessionId, Date.now() + ttlMs);
+	const now = Date.now();
+	for (const [sid, exp] of blockedSessions) {
+		if (exp < now) blockedSessions.delete(sid);
+	}
+}
+
+/**
+ * @param {string | null | undefined} sessionId
+ * @returns {boolean}
+ */
+export function isSessionBlocked(sessionId) {
+	if (!sessionId) return false;
+	const exp = blockedSessions.get(sessionId);
+	if (!exp) return false;
+	if (Date.now() >= exp) {
+		blockedSessions.delete(sessionId);
+		return false;
+	}
+	return true;
+}
+
+export function clearBlockedSessions() {
+	blockedSessions.clear();
+}
+
 // Claude Code encodes {device_id, account_uuid, session_id} as a JSON string
 // inside body.metadata.user_id.
-function extractSessionId(metadata) {
+/**
+ * @param {unknown} metadata
+ * @returns {string | null}
+ */
+export function extractSessionId(metadata) {
 	try {
 		const m = /** @type {{ user_id?: unknown } | undefined} */ (metadata);
 		const u = m?.user_id;
@@ -43,11 +92,12 @@ function extractSessionId(metadata) {
 
 /**
  * Resolve which backend to route a request to. Priority (top-down):
- *   glm-*            → GLM  (explicit user pick)
- *   claude-haiku-*   → Claude  (internal title/summary calls; don't waste GLM quota)
- *   session hint     → hint.backend
- *   claude-*         → Claude  (default tier)
- *   fallback         → config.defaultBackend
+ *   claude-haiku-*          → Claude  (internal title/summary calls; don't waste GLM quota)
+ *   blocked ∧ glm-target    → Claude  (reactive learning: session already got overflow)
+ *   glm-*                   → GLM     (explicit user pick)
+ *   session hint            → hint.backend
+ *   claude-*                → Claude  (default tier)
+ *   fallback                → config.defaultBackend
  *
  * @param {string | undefined} model
  * @param {unknown} metadata
@@ -55,15 +105,21 @@ function extractSessionId(metadata) {
  * @returns {Backend}
  */
 export function resolve(model, metadata, config) {
-	if (model?.startsWith("glm-")) return config.backends.glm;
 	if (model?.startsWith("claude-haiku-")) return config.backends.claude;
 
 	const sid = extractSessionId(metadata);
-	if (sid) {
-		const h = hints.get(sid);
-		if (h && Date.now() < h.expires) {
-			return config.backends[h.backend] ?? config.backends[config.defaultBackend];
-		}
+	const hint = sid ? hints.get(sid) : undefined;
+	const hintActive = !!(hint && Date.now() < hint.expires);
+
+	if (sid && isSessionBlocked(sid)) {
+		const targetsGlm = model?.startsWith("glm-") || (hintActive && hint?.backend === "glm");
+		if (targetsGlm) return config.backends.claude;
+	}
+
+	if (model?.startsWith("glm-")) return config.backends.glm;
+
+	if (hintActive && hint) {
+		return config.backends[hint.backend] ?? config.backends[config.defaultBackend];
 	}
 
 	if (model?.startsWith("claude-")) return config.backends.claude;
