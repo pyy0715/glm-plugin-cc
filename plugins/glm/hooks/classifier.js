@@ -45,7 +45,9 @@ const SYSTEM_PROMPT = [
 	'  do" is OTHER.',
 	"- Any natural language is fine; judge by intent regardless of",
 	"  language.",
-	"- When genuinely uncertain, choose OTHER.",
+	"- When genuinely uncertain, choose OTHER. Rationale: a misrouted OTHER",
+	"  is harmless (Claude handles coding too); a misrouted CODE on a large",
+	"  context triggers GLM overflow and wastes a round-trip.",
 	"</rules>",
 ].join("\n");
 

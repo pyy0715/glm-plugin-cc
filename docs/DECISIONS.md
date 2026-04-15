@@ -109,13 +109,16 @@ Claude Code에서 GLM(Z.ai)을 효율적으로 함께 사용하기 위한 도구
 
 | 순위 | 소스 | 설명 |
 |------|------|------|
-| 1 | `glm-*` prefix | 사용자가 `/model`에서 explicit하게 GLM을 고른 신호. 항상 GLM. |
-| 2 | `claude-haiku-*` prefix | Claude Code 내부 haiku(제목/요약 생성) 호출. 사용자 의도가 아닌 운영용 호출이므로 hint와 무관하게 Claude 고정. GLM 쿼터 낭비 방지. |
-| 3 | **세션별** `/_hint` TTL | hook 자동 분류 결과. `body.metadata.user_id`에서 추출한 `session_id` 키로 조회. **세션 간 교차 오염 없음.** `claude-sonnet-*`/`claude-opus-*` 기본 모델을 덮어씀. |
-| 4 | `claude-*` prefix | hint 없을 때의 기본 Claude. |
-| 5 | `config.defaultBackend` | 최종 폴백. 기본값 "claude". |
+| 1 | `claude-haiku-*` prefix | Claude Code 내부 haiku(제목/요약 생성) 호출. 사용자 의도가 아닌 운영용 호출이므로 hint와 무관하게 Claude 고정. GLM 쿼터 낭비 방지. |
+| 2 | 세션 block + GLM 타겟 | 같은 세션이 이미 GLM context overflow를 맞은 경우(§8), 이후 GLM-타겟 요청은 Claude로 선제 우회. TTL(기본 10분) 후 자동 재시도. |
+| 3 | `glm-*` prefix | 사용자가 `/model`에서 explicit하게 GLM을 고른 신호. block이 없으면 항상 GLM. |
+| 4 | **세션별** `/_hint` TTL | hook 자동 분류 결과. `body.metadata.user_id`에서 추출한 `session_id` 키로 조회. **세션 간 교차 오염 없음.** `claude-sonnet-*`/`claude-opus-*` 기본 모델을 덮어씀. |
+| 5 | `claude-*` prefix | hint 없을 때의 기본 Claude. |
+| 6 | `config.defaultBackend` | 최종 폴백. 기본값 "claude". |
 
 **왜 `claude-*` prefix가 hint보다 뒤에 오는가:** Claude Code가 기본으로 `claude-sonnet-4-6` / `claude-opus-4-6`를 요청에 실어보내기 때문에, 만약 prefix 우선이면 hook의 CODE 판정이 **항상 무시**됨. `claude-*`는 "기본값"이지 "명시 선택"이 아니므로 hint가 덮을 수 있어야 함. 반면 `glm-*`은 사용자가 picker에서 일부러 고른 것이라 explicit로 취급.
+
+**왜 session block이 explicit `glm-*`보다도 앞인가:** `/model glm-5.1`로 explicit 선택한 세션도 컨텍스트가 200K 넘으면 Z.ai가 거부(§8). 그 상태에서 재시도는 quota 낭비 + 체감 지연. block은 TTL로 자동 해제되므로 `/clear`/`/compact` 후엔 다시 GLM 시도됨. explicit 신호보다 관측된 거부가 강한 신호.
 
 ### 6. `/model` 피커에 GLM 추가
 
@@ -140,6 +143,28 @@ Z.ai 공식 플러그인(`zai-org/zai-coding-plugins`)에서 확인:
 - `TIME_LIMIT` = **MCP 월간 사용량** (Vision/Search/Reader)
 
 초기에 반대로 매핑했다가 수정함.
+
+### 8. 반응형 세션 블록 (context overflow 학습)
+
+**문제:** `/model claude-opus-4-6[1m]`을 켜면 Claude Code가 컨텍스트 윈도우를 1M으로 인식한다 (claw-code `src/utils/context.ts`의 `has1mContext = /\[1m\]/i.test(model)`). autoCompact 임계값이 ~987K로 올라가 누적 컨텍스트가 GLM 200K 한도를 크게 넘는 구간에 오래 머문다. 이 상태에서 hook이 CODE로 분류하면 GLM이 `200 OK + stop_reason=model_context_window_exceeded`(§10.3) 반환 → fallback으로 Claude 재호출. **컨텍스트는 단조 증가 경향**이라 같은 세션의 다음 턴도 99% 거부될 텐데 현행은 매번 시도해 quota/지연 낭비.
+
+**대안 검토:**
+| | 반응형 블록(채택) | byte 임계값 | `[1m]`→Claude 고정 |
+|---|---|---|---|
+| 하드코드 상수 | 없음 (TTL만) | 필요 (600KB 등 튜닝) | 없음 |
+| 언어/콘텐츠 영향 | 없음 | 영어 편향 | 없음 |
+| Z.ai 한도 변경 적응 | 자동 | 수동 | 무관 |
+| 첫 overflow 차단 | ❌ 1회 불가피 | ✅ | ✅ |
+| 2회차 이후 | ✅ | ✅ | ✅ |
+| 작은 코딩 턴 위임 | ✅ (block 전까지) | ✅ | ❌ (완전 차단) |
+
+**설계:**
+- `src/router.js`에 `blockedSessions: Map<sessionId, expiresAt>` 추가. `hints` Map과 동일한 GC-on-set 패턴.
+- `src/server.js`의 기존 3개 overflow 감지 분기 (400 `isContextLimitError`, 200 `isContextLimitByStopReason`, SSE `verdict==='context_exceeded'`)가 fallback 직전에 `markSessionBlocked(session_id)` 호출.
+- `resolve()`가 hint 조회 전에 block 체크: block 활성 + GLM 타겟이면 Claude 우회. explicit `glm-*` 선택도 덮음 (Z.ai 거부가 관측된 세션은 사용자 의도보다 강한 신호).
+- TTL `GLM_BLOCK_TTL_MS` 기본 10분. `/clear`/`/compact`으로 컨텍스트 줄어든 세션은 TTL 후 자동 재시도.
+
+**트레이드오프:** 세션당 첫 overflow 1회는 여전히 발생(감지 지점이 응답 수신 후). 이후 모든 턴은 절약. persistent store 없음 — 프록시 재시작 시 block Map 소실 허용(SessionStart hook 재기동 후 첫 overflow가 다시 학습 트리거).
 
 ---
 
@@ -224,7 +249,7 @@ Z.ai 공식 플러그인(`zai-org/zai-coding-plugins`)에서 확인:
 - [x] `/reload-plugins` env var 재적용 실증 — `ANTHROPIC_BASE_URL` 자동 재적용 확인 (LEARNINGS.md §2.2)
 
 ### 미완 (실사용 피드백 후 판단)
-- [ ] 분류 정확도 튜닝 — `scripts/verify-classifier.js`에 misclassification 케이스 추가
+- [ ] 분류 정확도 튜닝 — `scripts/verify-classifier.js`에 한국어 + reason-annotated 규칙 회귀 케이스 추가
 - [ ] Hook 전체 지연 측정 (현재 ~700-900ms 추정, 사용감 영향 미미)
 - [ ] 프록시 다운 시 graceful fallback (현재는 ECONNREFUSED → Claude Code 에러)
 - [ ] 모델 전환 지연(~20초) 원인 조사
@@ -269,7 +294,7 @@ glm-plugin-cc/
 ├── .claude-plugin/
 │   └── marketplace.json            마켓플레이스 메타
 ├── test/
-│   ├── router.test.js              세션별 힌트 라우팅 테스트
+│   ├── router.test.js              세션별 힌트 + block 라우팅 테스트
 │   ├── sanitize.test.js            thinking block strip
 │   ├── rewrite.test.js             model rewrite
 │   ├── fallback.test.js            context-limit 판정 + SSE detector

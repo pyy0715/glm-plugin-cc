@@ -4,7 +4,13 @@ import https from "node:https";
 import { createSseDetector, isContextLimitByStopReason, isContextLimitError } from "./fallback.js";
 import { forward } from "./proxy.js";
 import { rewriteModelForGlm } from "./rewrite.js";
-import { resolve, setHint } from "./router.js";
+import {
+	DEFAULT_BLOCK_TTL_MS,
+	extractSessionId,
+	markSessionBlocked,
+	resolve,
+	setHint,
+} from "./router.js";
 import { stripAssistantThinking } from "./sanitize.js";
 
 const NON_STREAM_BUFFER_LIMIT = 1024 * 1024;
@@ -79,6 +85,24 @@ function forwardToClaude(clientReq, clientRes, config, outboundBody, inboundMode
 	forward(clientReq, clientRes, config.backends.claude, fallbackBuffer);
 }
 
+// Record the overflowing session so subsequent GLM-bound turns from the same
+// session skip the wasted GLM round-trip (router preempts them to Claude).
+function recordOverflowAndFallback(
+	clientReq,
+	clientRes,
+	config,
+	outboundBody,
+	inboundModel,
+	reason,
+) {
+	const sid = extractSessionId(outboundBody?.metadata);
+	if (sid) {
+		markSessionBlocked(sid);
+		console.log(`[session-block] sid=${sid.slice(0, 8)} ttl=${DEFAULT_BLOCK_TTL_MS}ms`);
+	}
+	forwardToClaude(clientReq, clientRes, config, outboundBody, inboundModel, reason);
+}
+
 function glmRequestOptions(clientReq, backend, outboundBuffer) {
 	const url = new URL(backend.baseUrl + clientReq.url);
 	const proto = url.protocol === "https:" ? https : http;
@@ -137,7 +161,7 @@ function tryGlmNonStreaming(
 
 			if (isContextLimitError(status, parsed)) {
 				const snippet = String(parsed?.error?.message || "").slice(0, 80);
-				forwardToClaude(
+				recordOverflowAndFallback(
 					clientReq,
 					clientRes,
 					config,
@@ -148,7 +172,7 @@ function tryGlmNonStreaming(
 				return;
 			}
 			if (status === 200 && isContextLimitByStopReason(parsed)) {
-				forwardToClaude(
+				recordOverflowAndFallback(
 					clientReq,
 					clientRes,
 					config,
@@ -186,7 +210,7 @@ function tryGlmStreaming(clientReq, clientRes, outboundBody, outboundBuffer, inb
 				const parsed = parseMaybeJson(bodyBuf);
 				if (isContextLimitError(status, parsed)) {
 					const snippet = String(parsed?.error?.message || "").slice(0, 80);
-					forwardToClaude(
+					recordOverflowAndFallback(
 						clientReq,
 						clientRes,
 						config,
@@ -223,7 +247,7 @@ function tryGlmStreaming(clientReq, clientRes, outboundBody, outboundBuffer, inb
 
 			if (verdict === "context_exceeded") {
 				upstreamRes.destroy();
-				forwardToClaude(
+				recordOverflowAndFallback(
 					clientReq,
 					clientRes,
 					config,
