@@ -310,7 +310,7 @@ Dev 모드 setup이 번거로울 때, 디버그용으로 `~/.claude/plugins/cach
 
 ---
 
-## 10. 관측된 미해결 이슈
+## 10. 관측된 이슈 기록 (대부분 해결됨)
 
 ### 10.1 Turn-1 blocking anomaly (더 이상 재현 안 됨)
 
