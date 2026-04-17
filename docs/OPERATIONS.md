@@ -117,11 +117,12 @@ Current defense: `process.exit(0)` in `.finally()` guarantees the hook exits cle
 
 ```
 1. model.startsWith("claude-haiku-")  → Claude   (internal ops traffic)
-2. blocked session ∧ glm-target       → Claude   (reactive overflow learning, §10.5)
-3. model.startsWith("glm-")           → GLM      (explicit user pick)
-4. session hint (from hook)           → hint.backend
-5. model.startsWith("claude-")        → Claude   (default tier)
-6. config.defaultBackend              → final fallback
+2. FUP breaker tripped ∧ glm-target   → Claude   (FUP 1313 recovery, §12)
+3. blocked session ∧ glm-target       → Claude   (reactive overflow learning, §10.5)
+4. model.startsWith("glm-")           → GLM      (explicit user pick)
+5. session hint (from hook)           → hint.backend
+6. model.startsWith("claude-")        → Claude   (default tier)
+7. config.defaultBackend              → final fallback
 ```
 
 The rationale is in ARCHITECTURE §5. In practice:
@@ -411,3 +412,70 @@ Log: `[session-block] sid=<8char> ttl=600000ms` (emitted right after the fallbac
    Compare the hook log's `session_id` with the proxy log's `metadata`.
 
 **When clearing logs:** `truncate -s 0 /tmp/glm-proxy.log`. Never `rm && touch` on a file an active process holds open — see §6.2.
+
+---
+
+## 12. Classifier throttle + FUP circuit breaker
+
+### 12.1 Why this exists
+
+Z.ai error code **1313** ("Your account's current usage pattern does not comply with the Fair Usage Policy…") is triggered by the *shape* of traffic, not its volume. The classifier's original pattern — a fixed-template request with `max_tokens: 4` fired on every user prompt — is a textbook bot fingerprint from Z.ai's perspective, so even a low-rate Max-plan account gets flagged.
+
+Research context for the design choice: `1313` is account-level (not per-request like `1302`/`1303`). Continued requests during the cooldown observably extend the timer. Therefore the only safe recovery is a **long, enforced silence** — backoff with retries makes things worse.
+
+### 12.2 Two layers
+
+| Layer | Where | Role |
+|---|---|---|
+| Throttle | `src/router.js` `classifyCache` (Map) | Re-use the last classifier verdict for the same session for `GLM_CLASSIFY_THROTTLE_MS` (default 60s), so we don't classify every prompt. |
+| Breaker | `src/router.js` `fupBreaker` (singleton) | If a GLM response comes back with `error.code === 1313`, trip the breaker; for `GLM_FUP_COOLDOWN_MS` (default 1h) every GLM-target turn drains to Claude. |
+
+The breaker is a **single global state**, not per-session. 1313 is an account flag, so every session on this machine must pause.
+
+### 12.3 Control flow
+
+```
+hook  UserPromptSubmit
+ │
+ ├─ GET  /_should-classify?session_id=…
+ │   ├─ breaker tripped     → { skip:true, reason:"tripped", cooldownRemainingMs }
+ │   ├─ session cache hit   → { skip:true, reason:"throttled", cachedVerdict }
+ │   └─ else                → { skip:false }
+ │
+ ├─ skip=false:
+ │   ├─ classify() (glm-4.7 via proxy)
+ │   ├─ POST /_classified  { session_id, verdict }
+ │   └─ POST /_hint        { session_id, backend }
+ │
+ ├─ skip=true/throttled:
+ │   └─ POST /_hint (reuse cachedVerdict → backend)
+ │
+ └─ skip=true/tripped:
+     └─ (nothing — proxy.resolve() drains to Claude anyway)
+```
+
+Proxy side, the 1313 detector lives in both `tryGlmNonStreaming` and `tryGlmStreaming` (non-200 path) next to the existing context-overflow logic.
+
+### 12.4 Observability
+
+- Proxy log: `glm 1313 FUP tripped (non-stream|stream): <message snippet>`.
+- Statusline: `glm throttled (Nm)` in bold red — queried from `GET /_status` once per render when the proxy is alive.
+- `GET /_status` response includes `fupBreaker: { tripped, cooldownRemainingMs }`.
+
+### 12.5 Tuning knobs
+
+| Env var | Default | When to change |
+|---|---|---|
+| `GLM_CLASSIFY_THROTTLE_MS` | `60000` | Raise if you hit 1313 despite the throttle (e.g. 300000 = 5min); lower only if misrouting during rapid task-switching is observed. |
+| `GLM_FUP_COOLDOWN_MS` | `3600000` | Lower if Z.ai's actual cooldown is shorter for your account; raise if the 1313 keeps retriggering. |
+
+### 12.6 Persistence
+
+Breaker state is persisted to `/tmp/glm-fup-breaker.json` so it survives proxy restarts (log rotation, dev reloads). On startup `router.js` reads the file; stale entries (>24h old) are discarded. The path can be overridden via `GLM_FUP_STATE_PATH` for tests or sandboxed environments. Deleting the file while tripped is a manual override — do it only when you're confident Z.ai has lifted the flag.
+
+### 12.7 Known limits
+
+- The **first** request that triggers 1313 still surfaces the error to the user — we can only trip the breaker after seeing the response.
+- A user who explicitly `/model glm-5.1` during the cooldown still gets routed to Claude. No escape hatch by design (1313 severity argues for caution).
+- Substring detection in streams accepts a superset (e.g. `"code":13131` would false-positive match `"code":1313`). Z.ai's documented error codes don't collide, but this is a known limitation — see `test/fup-detection.test.js` for the pinned behavior.
+

@@ -118,6 +118,10 @@ const DEFAULT_MODEL = "glm-4.7";
  * Returns null on any failure (timeout, bad response, unknown label) so
  * the caller falls back to the default backend rather than misrouting.
  *
+ * FUP error 1313 handling lives proxy-side: every classifier call goes
+ * through the local proxy's `/v1/messages`, which inspects the Z.ai
+ * response and trips the circuit breaker. This function stays dumb.
+ *
  * @param {string} prompt
  * @param {{ proxyUrl: string, timeoutMs?: number, model?: string }} opts
  * @returns {Promise<"CODE" | "OTHER" | null>}

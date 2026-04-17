@@ -2,11 +2,18 @@ import { strict as assert } from "node:assert";
 import { beforeEach, describe, it } from "node:test";
 import {
 	clearBlockedSessions,
+	clearClassifyCache,
+	clearFupBreaker,
 	clearHints,
+	fupCooldownRemainingMs,
+	getClassificationVerdict,
+	isFupTripped,
 	isSessionBlocked,
 	markSessionBlocked,
+	recordClassification,
 	resolve,
 	setHint,
+	tripFupBreaker,
 } from "../src/router.js";
 
 const config = {
@@ -33,6 +40,8 @@ describe("router", () => {
 	beforeEach(() => {
 		clearHints();
 		clearBlockedSessions();
+		clearClassifyCache();
+		clearFupBreaker();
 	});
 
 	it("routes glm-* models to GLM", () => {
@@ -182,6 +191,93 @@ describe("router", () => {
 		it("markSessionBlocked is a no-op for empty sessionId", () => {
 			markSessionBlocked("");
 			assert.equal(isSessionBlocked(""), false);
+		});
+	});
+
+	describe("classifier throttle cache", () => {
+		it("returns null when nothing recorded", () => {
+			assert.equal(getClassificationVerdict("sessA"), null);
+		});
+
+		it("stores and retrieves a verdict", () => {
+			recordClassification("sessA", "CODE");
+			assert.equal(getClassificationVerdict("sessA"), "CODE");
+		});
+
+		it("expires after TTL", () => {
+			recordClassification("sessA", "CODE", 1);
+			const start = Date.now();
+			while (Date.now() - start < 5) {}
+			assert.equal(getClassificationVerdict("sessA"), null);
+		});
+
+		it("is isolated per session", () => {
+			recordClassification("sessA", "CODE");
+			recordClassification("sessB", "OTHER");
+			assert.equal(getClassificationVerdict("sessA"), "CODE");
+			assert.equal(getClassificationVerdict("sessB"), "OTHER");
+		});
+
+		it("ignores empty sessionId", () => {
+			recordClassification("", "CODE");
+			assert.equal(getClassificationVerdict(""), null);
+		});
+	});
+
+	describe("FUP circuit breaker", () => {
+		it("starts untripped", () => {
+			assert.equal(isFupTripped(), false);
+			assert.equal(fupCooldownRemainingMs(), 0);
+		});
+
+		it("tripping routes glm-* to claude", () => {
+			tripFupBreaker();
+			assert.equal(isFupTripped(), true);
+			const backend = resolve("glm-5.1", metaFor("sessA"), config);
+			assert.equal(backend.name, "claude");
+		});
+
+		it("tripping routes glm-hinted sessions to claude", () => {
+			tripFupBreaker();
+			setHint("sessA", "glm");
+			const backend = resolve("claude-opus-4-6", metaFor("sessA"), config);
+			assert.equal(backend.name, "claude");
+		});
+
+		it("tripping does not affect claude-* requests", () => {
+			tripFupBreaker();
+			const backend = resolve("claude-opus-4-6", metaFor("sessA"), config);
+			assert.equal(backend.name, "claude");
+		});
+
+		it("clearFupBreaker resets state", () => {
+			tripFupBreaker();
+			clearFupBreaker();
+			assert.equal(isFupTripped(), false);
+			const backend = resolve("glm-5.1", metaFor("sessA"), config);
+			assert.equal(backend.name, "glm");
+		});
+
+		it("cooldownRemainingMs decreases over time", () => {
+			tripFupBreaker();
+			const first = fupCooldownRemainingMs();
+			assert.ok(first > 0);
+			const start = Date.now();
+			while (Date.now() - start < 5) {}
+			const second = fupCooldownRemainingMs();
+			assert.ok(second < first);
+		});
+
+		it("tripFupBreaker is idempotent within an active cooldown", () => {
+			tripFupBreaker();
+			const firstTripped = fupCooldownRemainingMs();
+			const start = Date.now();
+			while (Date.now() - start < 5) {}
+			// Second call should NOT reset the window; remaining should be less,
+			// not equal or greater.
+			tripFupBreaker();
+			const secondTripped = fupCooldownRemainingMs();
+			assert.ok(secondTripped < firstTripped);
 		});
 	});
 });

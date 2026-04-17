@@ -40,6 +40,7 @@ Two axes where this plugin is uniquely positioned:
 - **Internal haiku calls always go to Claude** so Claude Code's title/summary plumbing doesn't burn GLM quota.
 - **Thinking blocks stripped from history** before forwarding, so backends don't reject each other's signatures when the route switches mid-session.
 - **Context-overflow aware** — when GLM rejects a turn with `model_context_window_exceeded` (common on `claude-opus-4-6[1m]` sessions whose context grows past GLM's 200K limit), the proxy records the session and preempts subsequent GLM-bound turns to Claude for 10 minutes. Earlier turns still go to GLM; only the overflowing session is skipped.
+- **FUP (Fair Usage Policy) aware** — classifier verdicts are cached per session for 60s so we don't re-ask GLM on every prompt. If Z.ai returns error `1313` (account-level FUP flag), the proxy trips a circuit breaker and drains all GLM-target traffic to Claude for 1 hour, letting the quiet window elapse without extending the server-side timer. State is surfaced as `glm throttled (Nm)` in the statusline. See [`docs/OPERATIONS.md`](docs/OPERATIONS.md#12-classifier-throttle--fup-circuit-breaker) §12.
 - **Proxy auto-recovery** — if the proxy crashes or is killed mid-session, the next prompt's hook respawns it automatically. Dead state is also surfaced in the statusline as `proxy down` in bold red.
 - **`/model glm-5.1` or `/model opus`** always override the classifier.
 - **OAuth token passthrough** — Claude-routed requests reuse your Claude Code OAuth header unchanged. GLM-routed requests swap it for `x-api-key: $GLM_API_KEY`.
@@ -183,6 +184,8 @@ Shows Claude 5-hour coding quota and GLM coding quota side-by-side. When the loc
 | `GLM_HINT_TTL_MS` | `60000` | How long a session hint stays valid |
 | `GLM_PROXY_READY_TIMEOUT_MS` | `3000` | How long the hooks poll for the proxy port after spawning |
 | `GLM_BLOCK_TTL_MS` | `600000` | How long a session stays blocked from GLM after a context-window overflow |
+| `GLM_CLASSIFY_THROTTLE_MS` | `60000` | How long a classifier verdict is re-used for the same session before re-asking GLM (FUP 1313 avoidance) |
+| `GLM_FUP_COOLDOWN_MS` | `3600000` | How long all GLM-target traffic drains to Claude after the proxy observes a 1313 Fair Usage Policy error |
 | `GLM_PROXY_LOG` | `/tmp/glm-proxy.log` | Where the proxy's stdout/stderr go when spawned by the hook |
 | `GLM_DEBUG` | unset | Proxy logs per-request metadata and thinking-strip events |
 | `GLM_HOOK_DEBUG` | unset | `route-hook.js` writes phase timings to `/tmp/glm-route-hook.log` |
