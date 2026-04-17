@@ -123,6 +123,18 @@ async function loadGlmQuota(cacheDir) {
 	}
 }
 
+async function loadProxyStatus(port) {
+	try {
+		const res = await fetch(`http://127.0.0.1:${port}/_status`, {
+			signal: AbortSignal.timeout(300),
+		});
+		if (!res.ok) return null;
+		return await res.json();
+	} catch {
+		return null;
+	}
+}
+
 const chunks = [];
 process.stdin.on("data", (chunk) => chunks.push(chunk));
 process.stdin.on("end", async () => {
@@ -171,7 +183,17 @@ process.stdin.on("end", async () => {
 		}
 	}
 
-	if (!proxyAlive) parts.push(`${RED_BOLD}proxy down${RESET}`);
+	if (!proxyAlive) {
+		parts.push(`${RED_BOLD}proxy down${RESET}`);
+	} else {
+		// Only query the proxy for breaker state when it's alive — avoids a
+		// redundant failing fetch when probe already said it's down.
+		const status = await loadProxyStatus(PROXY_PORT);
+		if (status?.fupBreaker?.tripped) {
+			const mins = Math.max(1, Math.ceil(status.fupBreaker.cooldownRemainingMs / 60_000));
+			parts.push(`${RED_BOLD}glm throttled (${mins}m)${RESET}`);
+		}
+	}
 
 	process.stdout.write(parts.join(" | "));
 });

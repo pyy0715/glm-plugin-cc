@@ -7,9 +7,14 @@ import { rewriteModelForGlm } from "./rewrite.js";
 import {
 	DEFAULT_BLOCK_TTL_MS,
 	extractSessionId,
+	fupCooldownRemainingMs,
+	getClassificationVerdict,
+	isFupTripped,
 	markSessionBlocked,
+	recordClassification,
 	resolve,
 	setHint,
+	tripFupBreaker,
 } from "./router.js";
 import { stripAssistantThinking } from "./sanitize.js";
 
@@ -45,7 +50,70 @@ function handleStatus(res, config) {
 		defaultBackend: config.defaultBackend,
 		glmRoutedModel: config.glmRoutedModel,
 		backends: Object.keys(config.backends),
+		fupBreaker: {
+			tripped: isFupTripped(),
+			cooldownRemainingMs: fupCooldownRemainingMs(),
+		},
 	});
+}
+
+// Claude Code session IDs are UUIDs (~36 chars); cap well above that to
+// reject accidental or malicious oversize keys that would grow the Map.
+const MAX_SESSION_ID_LEN = 128;
+
+function handleShouldClassify(res, url) {
+	const raw = url.searchParams.get("session_id") || "";
+	const sessionId = raw.length > MAX_SESSION_ID_LEN ? "" : raw;
+	if (isFupTripped()) {
+		sendJson(res, 200, {
+			skip: true,
+			reason: "tripped",
+			cooldownRemainingMs: fupCooldownRemainingMs(),
+		});
+		return;
+	}
+	const verdict = getClassificationVerdict(sessionId);
+	if (verdict) {
+		sendJson(res, 200, { skip: true, reason: "throttled", cachedVerdict: verdict });
+		return;
+	}
+	sendJson(res, 200, { skip: false });
+}
+
+function handleClassified(res, body) {
+	const sid = typeof body.session_id === "string" ? body.session_id : "";
+	if (!sid || sid.length > MAX_SESSION_ID_LEN) {
+		sendJson(res, 400, { error: "missing or oversized session_id" });
+		return;
+	}
+	if (body.verdict !== "CODE" && body.verdict !== "OTHER") {
+		sendJson(res, 400, { error: "invalid verdict" });
+		return;
+	}
+	recordClassification(sid, body.verdict);
+	sendJson(res, 200, { ok: true });
+}
+
+// Z.ai error code 1313 = Fair Usage Policy flag (account-level). Trip the
+// breaker so resolve() drains GLM-bound traffic until the quiet window
+// elapses. Accepts numeric or string codes; Z.ai has historically used both.
+export function maybeTripOnFupError(parsed, label) {
+	const code = parsed?.error?.code;
+	if (code === 1313 || code === "1313") {
+		tripFupBreaker();
+		const msg = String(parsed?.error?.message || "").slice(0, 120);
+		console.log(`  glm 1313 FUP tripped (${label}): ${msg}`);
+		return true;
+	}
+	return false;
+}
+
+// Cheap substring sniff for use inside SSE data chunks where we don't have a
+// fully-parsed JSON body. Both forms have been observed in Z.ai responses.
+// False positives are bounded: prelude window is ≤ 64KB, user content rarely
+// looks like either literal.
+export function looksLike1313(text) {
+	return text.includes('"code":1313') || text.includes('"code":"1313"');
 }
 
 function buildHeaders(backend, sourceHeaders, bodyLength, hostname) {
@@ -182,8 +250,13 @@ function tryGlmNonStreaming(
 				);
 				return;
 			}
-			if (status >= 400 && parsed?.error?.message) {
-				console.log(`  glm ${status} (no fallback): ${String(parsed.error.message).slice(0, 160)}`);
+			if (status >= 400) {
+				maybeTripOnFupError(parsed, "non-stream");
+				if (parsed?.error?.message) {
+					console.log(
+						`  glm ${status} (no fallback): ${String(parsed.error.message).slice(0, 160)}`,
+					);
+				}
 			}
 			writeBufferedResponse(clientRes, status, upstreamRes.headers, bodyBuf);
 		});
@@ -220,6 +293,9 @@ function tryGlmStreaming(clientReq, clientRes, outboundBody, outboundBuffer, inb
 					);
 					return;
 				}
+				if (status >= 400) {
+					maybeTripOnFupError(parsed, "stream");
+				}
 				writeBufferedResponse(clientRes, status, upstreamRes.headers, bodyBuf);
 			});
 			return;
@@ -243,7 +319,8 @@ function tryGlmStreaming(clientReq, clientRes, outboundBody, outboundBuffer, inb
 
 		upstreamRes.on("data", (chunk) => {
 			if (committed) return;
-			const verdict = detector.feed(chunk.toString("utf8"));
+			const text = chunk.toString("utf8");
+			const verdict = detector.feed(text);
 
 			if (verdict === "context_exceeded") {
 				upstreamRes.destroy();
@@ -256,6 +333,15 @@ function tryGlmStreaming(clientReq, clientRes, outboundBody, outboundBuffer, inb
 					"glm stream stop_reason: model_context_window_exceeded",
 				);
 				return;
+			}
+
+			// Z.ai sometimes returns 200 + SSE `event: error` carrying a 1313.
+			// Detect in the prelude window (before committing to passthrough)
+			// so we still trip the breaker; the bytes are passed through so
+			// the user sees the actual error message once.
+			if (!committed && looksLike1313(text)) {
+				tripFupBreaker();
+				console.log("  glm 1313 FUP tripped (200-stream prelude)");
 			}
 
 			prelude.push(chunk);
@@ -340,6 +426,19 @@ export function createServer(config) {
 				} catch {
 					sendJson(res, 400, { error: "invalid JSON" });
 				}
+				return;
+			}
+			if (req.url === "/_classified" && req.method === "POST") {
+				try {
+					handleClassified(res, JSON.parse(bodyBuffer.toString()));
+				} catch {
+					sendJson(res, 400, { error: "invalid JSON" });
+				}
+				return;
+			}
+			if (req.method === "GET" && req.url?.startsWith("/_should-classify")) {
+				const url = new URL(req.url, "http://localhost");
+				handleShouldClassify(res, url);
 				return;
 			}
 			if (req.url === "/_status" && req.method === "GET") {
