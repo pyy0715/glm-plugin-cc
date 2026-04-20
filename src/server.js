@@ -2,7 +2,7 @@
 import http from "node:http";
 import https from "node:https";
 import { createSseDetector, isContextLimitByStopReason, isContextLimitError } from "./fallback.js";
-import { forward } from "./proxy.js";
+import { dump400, forward } from "./proxy.js";
 import { rewriteModelForGlm } from "./rewrite.js";
 import {
 	DEFAULT_BLOCK_TTL_MS,
@@ -257,6 +257,9 @@ function tryGlmNonStreaming(
 						`  glm ${status} (no fallback): ${String(parsed.error.message).slice(0, 160)}`,
 					);
 				}
+				if (status === 400) {
+					dump400({ backend: "glm", reqBody: outboundBuffer, resBody: bodyBuf });
+				}
 			}
 			writeBufferedResponse(clientRes, status, upstreamRes.headers, bodyBuf);
 		});
@@ -295,6 +298,9 @@ function tryGlmStreaming(clientReq, clientRes, outboundBody, outboundBuffer, inb
 				}
 				if (status >= 400) {
 					maybeTripOnFupError(parsed, "stream");
+					if (status === 400) {
+						dump400({ backend: "glm", reqBody: outboundBuffer, resBody: bodyBuf });
+					}
 				}
 				writeBufferedResponse(clientRes, status, upstreamRes.headers, bodyBuf);
 			});
