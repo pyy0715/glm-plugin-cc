@@ -8,12 +8,9 @@ import {
 	DEFAULT_BLOCK_TTL_MS,
 	extractSessionId,
 	fupCooldownRemainingMs,
-	getClassificationVerdict,
 	isFupTripped,
 	markSessionBlocked,
-	recordClassification,
 	resolve,
-	setHint,
 	tripFupBreaker,
 } from "./router.js";
 import { stripAssistantThinking } from "./sanitize.js";
@@ -35,15 +32,6 @@ function writeBufferedResponse(clientRes, status, headers, bodyBuffer) {
 	clientRes.end(bodyBuffer);
 }
 
-function handleHint(res, body) {
-	if (!body.session_id || !body.backend) {
-		sendJson(res, 400, { error: "missing session_id or backend field" });
-		return;
-	}
-	setHint(body.session_id, body.backend, body.ttl || 60_000);
-	sendJson(res, 200, { ok: true, session_id: body.session_id, backend: body.backend });
-}
-
 function handleStatus(res, config) {
 	sendJson(res, 200, {
 		port: config.port,
@@ -55,43 +43,6 @@ function handleStatus(res, config) {
 			cooldownRemainingMs: fupCooldownRemainingMs(),
 		},
 	});
-}
-
-// Claude Code session IDs are UUIDs (~36 chars); cap well above that to
-// reject accidental or malicious oversize keys that would grow the Map.
-const MAX_SESSION_ID_LEN = 128;
-
-function handleShouldClassify(res, url) {
-	const raw = url.searchParams.get("session_id") || "";
-	const sessionId = raw.length > MAX_SESSION_ID_LEN ? "" : raw;
-	if (isFupTripped()) {
-		sendJson(res, 200, {
-			skip: true,
-			reason: "tripped",
-			cooldownRemainingMs: fupCooldownRemainingMs(),
-		});
-		return;
-	}
-	const verdict = getClassificationVerdict(sessionId);
-	if (verdict) {
-		sendJson(res, 200, { skip: true, reason: "throttled", cachedVerdict: verdict });
-		return;
-	}
-	sendJson(res, 200, { skip: false });
-}
-
-function handleClassified(res, body) {
-	const sid = typeof body.session_id === "string" ? body.session_id : "";
-	if (!sid || sid.length > MAX_SESSION_ID_LEN) {
-		sendJson(res, 400, { error: "missing or oversized session_id" });
-		return;
-	}
-	if (body.verdict !== "CODE" && body.verdict !== "OTHER") {
-		sendJson(res, 400, { error: "invalid verdict" });
-		return;
-	}
-	recordClassification(sid, body.verdict);
-	sendJson(res, 200, { ok: true });
 }
 
 // Z.ai error code 1313 = Fair Usage Policy flag (account-level). Trip the
@@ -420,27 +371,6 @@ export function createServer(config) {
 		req.on("end", () => {
 			const bodyBuffer = Buffer.concat(chunks);
 
-			if (req.url === "/_hint" && req.method === "POST") {
-				try {
-					handleHint(res, JSON.parse(bodyBuffer.toString()));
-				} catch {
-					sendJson(res, 400, { error: "invalid JSON" });
-				}
-				return;
-			}
-			if (req.url === "/_classified" && req.method === "POST") {
-				try {
-					handleClassified(res, JSON.parse(bodyBuffer.toString()));
-				} catch {
-					sendJson(res, 400, { error: "invalid JSON" });
-				}
-				return;
-			}
-			if (req.method === "GET" && req.url?.startsWith("/_should-classify")) {
-				const url = new URL(req.url, "http://localhost");
-				handleShouldClassify(res, url);
-				return;
-			}
 			if (req.url === "/_status" && req.method === "GET") {
 				handleStatus(res, config);
 				return;

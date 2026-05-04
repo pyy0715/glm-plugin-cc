@@ -81,9 +81,17 @@ Workaround: don't leave a `"model": "glm-..."` default in settings.json without 
 
 ---
 
-## 3. UserPromptSubmit hook
+## 3. Hooks
 
-### 3.1 stdin schema
+### 3.1 SessionStart (active)
+
+`session-start.js` calls `ensureProxyRunning()` from the shared `proxy-lifecycle.js` module. Probes port 4000; if dead, spawns the proxy detached and polls for readiness up to 3s.
+
+### 3.2 UserPromptSubmit hook (removed)
+
+> **Note:** The `UserPromptSubmit` hook has been removed. Only the `SessionStart` hook runs now. The sections below are kept as historical reference.
+
+### 3.1 stdin schema (historical)
 
 Empirically:
 
@@ -96,17 +104,7 @@ Empirically:
 
 Both fields are top-level. Claude Code's public docs called this field `user_prompt`; the actual field name is `prompt`.
 
-### 3.2 Execution timing
-
-By spec, **blocking** — the hook exits before the main API request fires. Usually true:
-
-- Typical trace: classifier takes ~800ms, hook exits, ~900ms later the main prompt arrives at the proxy. Blocking confirmed.
-
-**Anomaly once observed:** on a session's first prompt, the interval between the classifier request and the main prompt hitting the proxy was 14ms — the classifier couldn't have returned yet, so the hook was clearly *not* blocking. Not reproducible after cleaning the plugin cache; most likely cause was a stale hook version from a dirty cache (see §10.1).
-
-Current defense: `process.exit(0)` in `.finally()` guarantees the hook exits cleanly even if `await fetch(...)` misbehaves. The blocking contract itself is Claude Code's to keep.
-
-### 3.3 Hooks inherit `process.env`
+### 3.2 Hooks inherit `process.env`
 
 - Every value in the `env` block of `settings.json` is available to the hook and to the proxy it spawns (`GLM_HOOK_DEBUG`, `GLM_API_KEY`, etc).
 - Confirmed via `ps -Ewwp <proxy_pid>`.
@@ -118,38 +116,15 @@ Current defense: `process.exit(0)` in `.finally()` guarantees the hook exits cle
 ```
 1. model.startsWith("claude-haiku-")  → Claude   (internal ops traffic)
 2. FUP breaker tripped ∧ glm-target   → Claude   (FUP 1313 recovery, §12)
-3. blocked session ∧ glm-target       → Claude   (reactive overflow learning, §10.5)
+3. blocked session ∧ glm-target       → Claude   (reactive overflow learning)
 4. model.startsWith("glm-")           → GLM      (explicit user pick)
-5. session hint (from hook)           → hint.backend
-6. model.startsWith("claude-")        → Claude   (default tier)
-7. config.defaultBackend              → final fallback
+5. model.startsWith("claude-")        → Claude   (default tier)
+6. config.defaultBackend              → final fallback
 ```
 
 The rationale is in ARCHITECTURE §5. In practice:
 
-- `write a python function...` → classifier: CODE → hint=glm → opus request → routed to `glm`. ✅
-- `what is the capital of France?` → classifier: OTHER → hint=claude → opus request → routed to `claude`. ✅
-- Concurrent internal haiku (`claude-haiku-4-6`) → always pinned to `claude`. ✅
-
----
-
-## 5. Session-keyed hints
-
-### 5.1 The bug that forced this
-
-The first implementation used `let currentHint = null` at module scope — one global hint per proxy. Two sessions sharing the same proxy would see each other's hints for the TTL window.
-
-### 5.2 The fix
-
-- `const hints = new Map()` keyed by `session_id → { backend, expires }`.
-- `extractSessionId(metadata)` parses `metadata.user_id`.
-- `resolve()` looks up by session.
-
-TTL 60s covers multi-request bursts within one turn; the Map keeps sessions isolated.
-
-### 5.3 `/_hint` schema change
-
-Was `{ backend, ttl? }`, now **`{ session_id, backend, ttl? }`**. Missing `session_id` → 400.
+- Concurrent internal haiku (`claude-haiku-4-6`) → always pinned to `claude`.
 
 ---
 
@@ -160,7 +135,6 @@ Was `{ backend, ttl? }`, now **`{ session_id, backend, ttl? }`**. Missing `sessi
 Shared module: `plugins/glm/hooks/proxy-lifecycle.js` exports `checkPort`, `waitReady`, `spawnProxy`, `ensureProxyRunning` — returns one of `"already-up" | "started" | "missing-path" | "unreachable"`.
 
 - **SessionStart hook:** on every session open. Probes port 4000; if dead, spawns the proxy detached (`spawn + detached + unref`, stdio → log file) and polls for readiness up to 3s.
-- **UserPromptSubmit hook:** every prompt. Runs `ensureProxyRunning()` before the classifier. Healthy case is a ~1–5ms TCP probe and through; dead case respawns and polls. Recovery of open sessions no longer needs `/exit` + `/resume`.
 - Skipped cleanly if `GLM_PROXY_PATH` isn't set (graceful degradation pre-setup).
 
 ### 6.2 Orphan log inode trap
@@ -188,52 +162,6 @@ The proxy uses `upstreamRes.pipe(clientRes)` for the body. No special handling, 
 
 - **Claude route:** preserve the request's `Authorization` header (OAuth passthrough).
 - **GLM route:** drop `Authorization`, inject `x-api-key: $GLM_API_KEY`.
-
----
-
-## 7. Classifier
-
-### 7.1 Implementation
-
-- Model: `glm-4.7` (1× quota, the cheapest GLM tier).
-- Calls the proxy's own `/v1/messages` — the `glm-` prefix routes it to GLM automatically, no extra auth needed.
-- System prompt separated from user turn; user prompt truncated to the first 2000 chars.
-- 5s timeout; `null` on any failure → no hint sent → default backend applies.
-
-### 7.2 Redesign history (2026-04-14)
-
-The original "software-related == CODE" framing broke twice:
-
-**Round 1 — few-shot vocabulary bias (7 → 5 balanced).** Symptom: simple complaints like "에러나는데" misclassified as CODE → routed to GLM → context overflow. Cause: the `NullPointerException` CODE example pulled the Korean word 에러 toward CODE. Fix: fewer examples, vocabulary spread across both labels.
-
-**Round 2 — "production vs. conversation" redefinition (inspired by NVIDIA's LLM Router pattern).** Symptom: `explain kubectl`, `explain what this regex matches` classified as CODE. Feedback: explanatory questions belong on Claude for context continuity. Redefinition: CODE only = intent to **produce or modify** code on a named artifact. Everything else (explanation, diagnostic questions, advice, chat) = OTHER.
-
-Current shape:
-
-- English-only system prompt with XML `<task>` / `<definition>` / `<rules>` blocks.
-- 6+6 few-shot: CODE (production/modification/fix), OTHER (explanation/diagnostic/opinion/chat/general/meta).
-- Vocabulary spread: "error", "NullPointerException", "kubectl", "git" all appear on both sides.
-- Asymmetric tie-breaker: uncertain → OTHER (see §7.5).
-
-### 7.3 Verification harness
-
-`scripts/verify-classifier.js` — 17 cases (previous misclassification recoveries + regression guards). 50ms sleep between calls, single retry on null. Excluded from `npm test` because it hits live GLM and burns quota. Run it after any classifier change.
-
-Latest result: **17/17 pass**.
-
-### 7.4 Latency
-
-- Warm: 600–900ms.
-- Cold: slower (suspected contributor to the anomaly in §10.1).
-
-### 7.5 Asymmetric safety principle
-
-| Misclassification | Cost |
-|---|---|
-| OTHER → GLM (a conversational turn routed to GLM) | 1 wasted GLM call + risk of context overflow; fallback absorbs it |
-| CODE → Claude (a code turn routed to Claude) | functionally fine; Claude handles coding too |
-
-When uncertain, OTHER is the economically safer default. The classifier's rule list bakes this in explicitly.
 
 ---
 
@@ -295,12 +223,9 @@ Edit `~/.claude/plugins/cache/<name>/<plugin>/<version>/` directly for a one-off
 | Variable | Effect |
 |---|---|
 | `GLM_DEBUG=1` | Proxy logs `body.metadata` and `system` summary per request to stdout. |
-| `GLM_HOOK_DEBUG=1` | `route-hook.js` writes phase timings to `/tmp/glm-route-hook.log`. |
 | `GLM_PROXY_LOG` | File the SessionStart hook redirects proxy stdout/stderr to. Default `/tmp/glm-proxy.log`. |
 | `GLM_PROXY_URL` | Where hooks reach the proxy. Default `http://localhost:4000`. |
-| `GLM_CLASSIFY_TIMEOUT_MS` | Classifier fetch timeout. Default 5000. |
-| `GLM_HINT_TTL_MS` | TTL attached to each hint. Default 60000. |
-| `GLM_PROXY_READY_TIMEOUT_MS` | Readiness-poll ceiling for SessionStart/UserPromptSubmit. Default 3000. |
+| `GLM_PROXY_READY_TIMEOUT_MS` | Readiness-poll ceiling for SessionStart. Default 3000. |
 | `GLM_BLOCK_TTL_MS` | How long a session stays blocked from GLM after a context overflow (§10.5). Default 600000 (10min). |
 
 ---
@@ -381,9 +306,9 @@ Log: `[session-block] sid=<8char> ttl=600000ms` (emitted right after the fallbac
 
 **Symptom:** With `ANTHROPIC_BASE_URL=http://localhost:4000` set, a dead proxy (dev reload, kill for the orphan-inode trap §6.2, post-reboot) made every open Claude Code session return ECONNREFUSED until the user did `/exit` + `/resume` to retrigger SessionStart.
 
-**Fix:** `route-hook.js` calls `ensureProxyRunning()` before the classifier. Healthy proxy: ~1–5ms TCP probe, through. Dead proxy: respawn via the shared `plugins/glm/hooks/proxy-lifecycle.js` logic, up to 3s readiness poll.
+**Fix:** `session-start.js` calls `ensureProxyRunning()` on every session open. Healthy proxy: ~1–5ms TCP probe, through. Dead proxy: respawn via the shared `plugins/glm/hooks/proxy-lifecycle.js` logic, up to 3s readiness poll.
 
-**Race limitation:** if the anomaly of §3.2 resurfaces (hook not blocking the main request), the respawn may finish after the main API request has already fired — that one turn still 502s, the next turn recovers. Under normal ~900ms blocking, the respawn precedes the main request.
+**Race limitation:** The respawn happens during SessionStart, before any API requests fire. If the proxy dies mid-session, recovery requires a new session (`/exit` + `/resume`) to retrigger SessionStart.
 
 **Visibility:** `plugins/glm/scripts/statusline.js` probes port 4000 with a 300ms timeout (1s cached). Down → bold-red `proxy down` at the end of the status line. Users see the state before hitting it.
 
@@ -400,73 +325,44 @@ Log: `[session-block] sid=<8char> ttl=600000ms` (emitted right after the fallbac
    `lsof -ti:4000` and `curl -s http://localhost:4000/_status`.
 3. **Is the log file an orphan inode?**
    `stat /tmp/glm-proxy.log` vs `lsof -p <proxy_pid>` — compare inodes.
-4. **Did the hook actually run?**
-   `GLM_HOOK_DEBUG=1`, then look for phase markers in `/tmp/glm-route-hook.log`.
-5. **Did classification return?**
-   `classify-done result=CODE|OTHER|null` in the hook log.
-6. **Did the hint POST succeed?**
-   `hint-post-done status=200` in the hook log.
-7. **What did the router decide?**
+4. **What did the router decide?**
    `model -> backend` lines in `/tmp/glm-proxy.log`.
-8. **Does `session_id` match across logs?**
-   Compare the hook log's `session_id` with the proxy log's `metadata`.
+5. **Does `session_id` match across logs?**
+   Compare hook session IDs with the proxy log's `metadata`.
 
 **When clearing logs:** `truncate -s 0 /tmp/glm-proxy.log`. Never `rm && touch` on a file an active process holds open — see §6.2.
 
 ---
 
-## 12. Classifier throttle + FUP circuit breaker
+## 12. FUP circuit breaker
 
 ### 12.1 Why this exists
 
-Z.ai error code **1313** ("Your account's current usage pattern does not comply with the Fair Usage Policy…") is triggered by the *shape* of traffic, not its volume. The classifier's original pattern — a fixed-template request with `max_tokens: 4` fired on every user prompt — is a textbook bot fingerprint from Z.ai's perspective, so even a low-rate Max-plan account gets flagged.
+Z.ai error code **1313** ("Your account's current usage pattern does not comply with the Fair Usage Policy…") is triggered by the *shape* of traffic, not its volume. Even a low-rate Max-plan account can get flagged if the traffic pattern looks automated.
 
 Research context for the design choice: `1313` is account-level (not per-request like `1302`/`1303`). Continued requests during the cooldown observably extend the timer. Therefore the only safe recovery is a **long, enforced silence** — backoff with retries makes things worse.
 
-### 12.2 Two layers
+### 12.2 Breaker
 
 | Layer | Where | Role |
 |---|---|---|
-| Throttle | `src/router.js` `classifyCache` (Map) | Re-use the last classifier verdict for the same session for `GLM_CLASSIFY_THROTTLE_MS` (default 60s), so we don't classify every prompt. |
 | Breaker | `src/router.js` `fupBreaker` (singleton) | If a GLM response comes back with `error.code === 1313`, trip the breaker; for `GLM_FUP_COOLDOWN_MS` (default 1h) every GLM-target turn drains to Claude. |
 
 The breaker is a **single global state**, not per-session. 1313 is an account flag, so every session on this machine must pause.
 
 ### 12.3 Control flow
 
-```
-hook  UserPromptSubmit
- │
- ├─ GET  /_should-classify?session_id=…
- │   ├─ breaker tripped     → { skip:true, reason:"tripped", cooldownRemainingMs }
- │   ├─ session cache hit   → { skip:true, reason:"throttled", cachedVerdict }
- │   └─ else                → { skip:false }
- │
- ├─ skip=false:
- │   ├─ classify() (glm-4.7 via proxy)
- │   ├─ POST /_classified  { session_id, verdict }
- │   └─ POST /_hint        { session_id, backend }
- │
- ├─ skip=true/throttled:
- │   └─ POST /_hint (reuse cachedVerdict → backend)
- │
- └─ skip=true/tripped:
-     └─ (nothing — proxy.resolve() drains to Claude anyway)
-```
-
 Proxy side, the 1313 detector lives in both `tryGlmNonStreaming` and `tryGlmStreaming` (non-200 path) next to the existing context-overflow logic.
 
 ### 12.4 Observability
 
 - Proxy log: `glm 1313 FUP tripped (non-stream|stream): <message snippet>`.
-- Statusline: `glm throttled (Nm)` in bold red — queried from `GET /_status` once per render when the proxy is alive.
 - `GET /_status` response includes `fupBreaker: { tripped, cooldownRemainingMs }`.
 
 ### 12.5 Tuning knobs
 
 | Env var | Default | When to change |
 |---|---|---|
-| `GLM_CLASSIFY_THROTTLE_MS` | `60000` | Raise if you hit 1313 despite the throttle (e.g. 300000 = 5min); lower only if misrouting during rapid task-switching is observed. |
 | `GLM_FUP_COOLDOWN_MS` | `3600000` | Lower if Z.ai's actual cooldown is shorter for your account; raise if the 1313 keeps retriggering. |
 
 ### 12.6 Persistence
