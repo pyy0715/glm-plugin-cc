@@ -83,7 +83,7 @@ function buildHeaders(backend, sourceHeaders, bodyLength, hostname) {
 }
 
 // Restore the user's original model so the Claude backend accepts the body
-// after we rewrote it to glm-5.1 for the GLM attempt.
+// after we rewrote it to glm-5.2 for the GLM attempt.
 function buildFallbackBuffer(outboundBody, inboundModel) {
 	const { model: _dropped, ...rest } = outboundBody ?? {};
 	const restored = inboundModel ? { ...rest, model: inboundModel } : rest;

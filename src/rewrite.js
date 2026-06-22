@@ -14,6 +14,12 @@
 export function rewriteModelForGlm(body, { targetModel }) {
 	if (!body) return { body, modified: false };
 	if (typeof body.model === "string" && body.model.startsWith("glm-")) {
+		// Claude Code appends a `[1m]` suffix to flag 1M context. Z.ai is
+		// natively 1M and rejects the suffix with 1211 Unknown Model, so strip
+		// it before forwarding. The user's explicit glm-* pick still wins.
+		if (body.model.endsWith("[1m]")) {
+			return { body: { ...body, model: body.model.slice(0, -4) }, modified: true };
+		}
 		return { body, modified: false };
 	}
 	return { body: { ...body, model: targetModel }, modified: true };

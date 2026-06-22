@@ -37,7 +37,7 @@ describe("router", () => {
 	});
 
 	it("routes glm-* models to GLM", () => {
-		const backend = resolve("glm-5.1", undefined, config);
+		const backend = resolve("glm-5.2", undefined, config);
 		assert.equal(backend.name, "glm");
 	});
 
@@ -64,7 +64,7 @@ describe("router", () => {
 	describe("session blocking", () => {
 		it("blocked session with glm-* model routes to Claude", () => {
 			markSessionBlocked("sessA");
-			const backend = resolve("glm-5.1", metaFor("sessA"), config);
+			const backend = resolve("glm-5.2", metaFor("sessA"), config);
 			assert.equal(backend.name, "claude");
 		});
 
@@ -76,8 +76,8 @@ describe("router", () => {
 
 		it("block is isolated per session", () => {
 			markSessionBlocked("sessA");
-			const a = resolve("glm-5.1", metaFor("sessA"), config);
-			const b = resolve("glm-5.1", metaFor("sessB"), config);
+			const a = resolve("glm-5.2", metaFor("sessA"), config);
+			const b = resolve("glm-5.2", metaFor("sessB"), config);
 			assert.equal(a.name, "claude");
 			assert.equal(b.name, "glm");
 		});
@@ -86,7 +86,7 @@ describe("router", () => {
 			markSessionBlocked("sessA", 1);
 			const start = Date.now();
 			while (Date.now() - start < 5) {}
-			const backend = resolve("glm-5.1", metaFor("sessA"), config);
+			const backend = resolve("glm-5.2", metaFor("sessA"), config);
 			assert.equal(backend.name, "glm");
 			assert.equal(isSessionBlocked("sessA"), false);
 		});
@@ -114,7 +114,7 @@ describe("router", () => {
 		it("tripping routes glm-* to Claude", () => {
 			tripFupBreaker();
 			assert.equal(isFupTripped(), true);
-			const backend = resolve("glm-5.1", metaFor("sessA"), config);
+			const backend = resolve("glm-5.2", metaFor("sessA"), config);
 			assert.equal(backend.name, "claude");
 		});
 
@@ -128,7 +128,7 @@ describe("router", () => {
 			tripFupBreaker();
 			clearFupBreaker();
 			assert.equal(isFupTripped(), false);
-			const backend = resolve("glm-5.1", metaFor("sessA"), config);
+			const backend = resolve("glm-5.2", metaFor("sessA"), config);
 			assert.equal(backend.name, "glm");
 		});
 

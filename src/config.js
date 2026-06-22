@@ -21,7 +21,7 @@ export function load(overrides = {}) {
 	return {
 		port: Number(overrides.port || process.env.PROXY_PORT || 4000),
 		defaultBackend: overrides.defaultBackend || process.env.DEFAULT_BACKEND || "claude",
-		glmRoutedModel: process.env.GLM_ROUTED_MODEL || "glm-5.1",
+		glmRoutedModel: process.env.GLM_ROUTED_MODEL || "glm-5.2",
 		backends: {
 			claude: {
 				name: "claude",

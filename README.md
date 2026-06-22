@@ -121,7 +121,7 @@ After setup, just use Claude Code normally:
 
 - Code-related prompts → classified as `CODE` → routed to GLM
 - Everything else → classified as `OTHER` → routed to Claude
-- `/model glm-5.1` → forces GLM for the session
+- `/model glm-5.2` → forces GLM for the session
 - `/model opus` → forces Claude for the session
 
 Routing decisions land in `/tmp/glm-proxy.log` (set `GLM_DEBUG=1` under `env` for extra detail).
@@ -133,17 +133,20 @@ Routing decisions land in `/tmp/glm-proxy.log` (set `GLM_DEBUG=1` under `env` fo
 ```json
 {
   "env": {
-    "ANTHROPIC_CUSTOM_MODEL_OPTION": "glm-5.1",
-    "ANTHROPIC_CUSTOM_MODEL_OPTION_NAME": "GLM-5.1",
-    "ANTHROPIC_CUSTOM_MODEL_OPTION_DESCRIPTION": "Z.ai GLM-5.1 (routed via glm-proxy)"
+    "ANTHROPIC_CUSTOM_MODEL_OPTION": "glm-5.2[1m]",
+    "ANTHROPIC_CUSTOM_MODEL_OPTION_NAME": "GLM-5.2",
+    "ANTHROPIC_CUSTOM_MODEL_OPTION_DESCRIPTION": "Z.ai GLM-5.2 1M (routed via glm-proxy)",
+    "CLAUDE_CODE_AUTO_COMPACT_WINDOW": "1000000"
   }
 }
 ```
 
-Available GLM models (pass via `/model` or `ANTHROPIC_CUSTOM_MODEL_OPTION`): `glm-5.1`, `glm-5`, `glm-5-turbo`, `glm-4.7`, `glm-4.6`, `glm-4.5`, `glm-4.5-air`.
+The `[1m]` suffix tells Claude Code to treat the model as 1M-context (it strips the suffix before sending to the proxy; the proxy forwards a bare `glm-5.2` to Z.ai, which is natively 1M).
 
-- GLM-5.1 / 5 / 5-Turbo: 3x quota peak, 2x off-peak
-- GLM-4.7: 1x quota — used for the classifier (so classification doesn't eat your main budget)
+Available GLM models (pass via `/model` or `ANTHROPIC_CUSTOM_MODEL_OPTION`): `glm-5.2`, `glm-5.1`, `glm-5`, `glm-5-turbo`, `glm-4.7`, `glm-4.6`, `glm-4.5`, `glm-4.5-air`.
+
+- GLM-5.2 / 5.1 / 5 / 5-Turbo: 3x quota peak, 2x off-peak
+- GLM-4.7: 1x quota
 
 ## Statusline (optional)
 
@@ -178,7 +181,7 @@ Shows Claude 5-hour coding quota and GLM coding quota side-by-side. When the loc
 | `GLM_PROXY_PATH` | — | Absolute path to `bin/glm-proxy.js`, used by both the `SessionStart` and `UserPromptSubmit` hooks |
 | `PROXY_PORT` | `4000` | Proxy listen port |
 | `DEFAULT_BACKEND` | `claude` | Final fallback when no hint and no prefix matches |
-| `GLM_ROUTED_MODEL` | `glm-5.1` | Model the proxy substitutes when routing to GLM with a non-`glm-*` request (i.e. classifier-driven routing of `claude-sonnet-*` / `claude-opus-*`). Set to `glm-4.7` for cheaper auto-routing. |
+| `GLM_ROUTED_MODEL` | `glm-5.2` | Model the proxy substitutes when routing to GLM with a non-`glm-*` request. |
 | `GLM_PROXY_URL` | `http://localhost:4000` | Where the hook reaches the proxy |
 | `GLM_CLASSIFY_TIMEOUT_MS` | `5000` | Classifier fetch timeout |
 | `GLM_HINT_TTL_MS` | `60000` | How long a session hint stays valid |
