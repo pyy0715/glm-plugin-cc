@@ -1,6 +1,6 @@
 ---
 name: setup
-description: One-time setup for the GLM plugin. Configures ANTHROPIC_BASE_URL, GLM_API_KEY, and GLM_PROXY_PATH in ~/.claude/settings.json so the SessionStart hook can auto-start the proxy. Invoke via /glm:setup.
+description: One-time setup for the GLM plugin. Configures ANTHROPIC_BASE_URL, GLM_API_KEY, and GLM_PROXY_PATH in ~/.claude/settings.json so the SessionStart hook can auto-start the proxy, and optionally registers GLM in the /model picker with its 1M context window. Invoke via /glm:setup.
 ---
 
 # GLM plugin setup
@@ -42,7 +42,24 @@ Read the current file, then merge the following into the `env` object (create `e
 
 Write the file back with 2-space indentation, matching the existing formatting.
 
-### 4. Inform the user
+### 4. Register GLM in the `/model` picker (optional, 1M context)
+
+Ask the user: "Register GLM in the `/model` picker with the 1M context window?" If yes, merge into `env`:
+
+```json
+{
+  "env": {
+    "ANTHROPIC_CUSTOM_MODEL_OPTION": "glm-5.3-flash[1m]",
+    "ANTHROPIC_CUSTOM_MODEL_OPTION_NAME": "GLM-5.3-Flash (1M)",
+    "ANTHROPIC_CUSTOM_MODEL_OPTION_SUPPORTED_CAPABILITIES": "effort,thinking",
+    "CLAUDE_CODE_AUTO_COMPACT_WINDOW": "1000000"
+  }
+}
+```
+
+`[1m]` opts Claude Code into a 1M-token compaction window (see model-config docs). `src/rewrite.js` strips it before the request reaches Z.ai — Z.ai rejects the raw suffix.
+
+### 5. Inform the user
 
 Tell the user, verbatim:
 

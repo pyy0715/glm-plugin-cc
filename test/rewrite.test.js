@@ -23,6 +23,30 @@ describe("rewriteModelForGlm", () => {
 		assert.equal(out, body);
 	});
 
+	it("strips a trailing [1m] context suffix from an explicit glm-* pick", () => {
+		// Z.ai rejects "glm-5.3-flash[1m]" outright — see rewrite.js.
+		const body = { model: "glm-5.3-flash[1m]", messages: [] };
+		const { body: out, modified } = rewriteModelForGlm(body, {
+			targetModel: "glm-5.3-flash",
+		});
+		assert.equal(modified, true);
+		assert.equal(out.model, "glm-5.3-flash");
+	});
+
+	it("strips [1m] case-insensitively", () => {
+		const body = { model: "glm-5.3-flash[1M]", messages: [] };
+		const { body: out } = rewriteModelForGlm(body, { targetModel: "glm-5.3-flash" });
+		assert.equal(out.model, "glm-5.3-flash");
+	});
+
+	it("strips [1m] from the fallback targetModel too", () => {
+		const body = { model: "claude-opus-4-6", messages: [] };
+		const { body: out } = rewriteModelForGlm(body, {
+			targetModel: "glm-5.3-flash[1m]",
+		});
+		assert.equal(out.model, "glm-5.3-flash");
+	});
+
 	it("rewrites unknown / unprefixed model names", () => {
 		const body = { model: "something-else", messages: [] };
 		const { body: out, modified } = rewriteModelForGlm(body, {
