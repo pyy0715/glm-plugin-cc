@@ -42,7 +42,7 @@ describe("statusline.js", () => {
 				context_window: { used_percentage: 43 },
 				rate_limits: {
 					five_hour: { used_percentage: 42, resets_at: now + 3600 },
-					seven_day: { used_percentage: 18, resets_at: now + 86400 },
+					seven_day: { used_percentage: 18, resets_at: now + 86400 * 2 + 3600 * 5 },
 				},
 			},
 			{ GLM_API_KEY: "" },
@@ -54,15 +54,18 @@ describe("statusline.js", () => {
 		assert.ok(text.includes("42%"), `Expected 5h percentage, got: ${text}`);
 		assert.ok(text.includes("18%"), `Expected 7d percentage, got: ${text}`);
 		assert.ok(text.includes("Reset"), `Expected a reset time label, got: ${text}`);
+		assert.ok(text.includes("2d "), `Expected a day-scale reset time, got: ${text}`);
 		assert.ok(/[█░]/.test(text), `Expected a block bar, got: ${text}`);
+		// Ctx, 5H, and 7D render on a single line, separated by │.
+		assert.equal(text.split("\n")[0].match(/│/g)?.length, 3, `Expected one line, got: ${text}`);
 	});
 
 	it("shows -- for rows with no data instead of a bar", async () => {
 		const { stdout } = await run({}, { GLM_API_KEY: "" });
 		const text = plain(stdout);
 		assert.ok(text.includes("Ctx --"), `Expected Ctx --, got: ${text}`);
-		assert.ok(text.includes("5H  --"), `Expected 5H --, got: ${text}`);
-		assert.ok(text.includes("7D  --"), `Expected 7D --, got: ${text}`);
+		assert.ok(text.includes("5H --"), `Expected 5H --, got: ${text}`);
+		assert.ok(text.includes("7D --"), `Expected 7D --, got: ${text}`);
 	});
 
 	it("handles empty stdin gracefully", async () => {

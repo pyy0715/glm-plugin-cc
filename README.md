@@ -127,9 +127,7 @@ Add manually to `~/.claude/settings.json`:
 Shows a CC-statusline-style block-bar layout: model name + context-window usage, Claude's 5-hour and 7-day rate-limit windows (each with a bar, percentage, and reset time), and GLM's 5-hour coding quota. Deliberately leaves out git status and cost tracking — Claude Code's own status line already covers those if you want them elsewhere. When the local proxy is unreachable, `proxy down` appears in bold red on its own line; if the Z.ai Fair Usage Policy breaker trips, `glm throttled (Nm)` appears there instead.
 
 ```
-Sonnet 5 │ Ctx ████░░░░░░ 43%
-5H  ████░░░░░░ 42% (Reset 2h14m)
-7D  ██░░░░░░░░ 18% (Reset 71h59m)
+Sonnet 5 │ Ctx ████░░░░░░ 43% │ 5H ████░░░░░░ 42% (Reset 2h14m) │ 7D ██░░░░░░░░ 18% (Reset 2d 23h59m)
 GLM[max] ░░░░░░░░░░ 1% (resets every 5h)
 ```
 

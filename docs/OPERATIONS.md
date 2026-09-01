@@ -342,7 +342,7 @@ Proxy side, the 1313 detector lives in `forwardToGlm` (`src/server.js`): once th
 
 ### 12.4 Observability
 
-- Proxy log: `glm 1313 FUP tripped (non-stream|stream): <message snippet>`.
+- Proxy log: `glm 1313 FUP tripped (error response): <message snippet>`.
 - `GET /_status` response includes `fupBreaker: { tripped, cooldownRemainingMs }`.
 
 ### 12.5 Tuning knobs
@@ -353,7 +353,18 @@ Proxy side, the 1313 detector lives in `forwardToGlm` (`src/server.js`): once th
 
 ### 12.6 Persistence
 
-Breaker state is persisted to `/tmp/glm-fup-breaker.json` so it survives proxy restarts (log rotation, dev reloads). On startup `router.js` reads the file; stale entries (>24h old) are discarded. The path can be overridden via `GLM_FUP_STATE_PATH` for tests or sandboxed environments. Deleting the file while tripped is a manual override — do it only when you're confident Z.ai has lifted the flag.
+Breaker state is persisted to `/tmp/glm-fup-breaker.json` so it survives proxy restarts (log rotation, dev reloads). On startup `router.js` reads the file; stale entries (>24h old) are discarded. The path can be overridden via `GLM_FUP_STATE_PATH` for tests or sandboxed environments.
+
+**Deleting the file does not clear a running proxy.** `fupBreaker` is an in-memory singleton in `router.js` — the file is written on every state change but only read once, at startup. Removing `/tmp/glm-fup-breaker.json` while the proxy is up has no effect until the next restart, and `GET /_status` can keep reporting `tripped: true` from stale memory with no file on disk.
+
+**To clear a live proxy without restarting it**, call the reset endpoint instead:
+
+```bash
+curl -X POST http://localhost:4000/_status/clear-fup
+# {"cleared":true,"wasTripped":true}
+```
+
+Only do this when you're confident Z.ai lifted the flag — check the Plan Overview page in the Z.ai console for an active risk notice (`docs.z.ai/devpack/usage-policy`) before clearing, since re-tripping immediately just confirms the flag is still live.
 
 ### 12.7 Known limits
 

@@ -79,12 +79,16 @@ function renderBar(pct) {
 	return `${colorize(clamped)}${bar}${RESET}`;
 }
 
+// Formats as "Xd Yh Zm", dropping zero-value leading units, e.g. "1d 5h30m".
 function formatResetTime(epochSec) {
 	const diffMs = epochSec * 1000 - Date.now();
 	if (diffMs <= 0) return "now";
-	const hours = Math.floor(diffMs / 3_600_000);
+	const days = Math.floor(diffMs / 86_400_000);
+	const hours = Math.floor((diffMs % 86_400_000) / 3_600_000);
 	const mins = Math.floor((diffMs % 3_600_000) / 60_000);
-	return hours > 0 ? `${hours}h${mins > 0 ? `${mins}m` : ""}` : `${mins}m`;
+	if (days > 0) return `${days}d ${hours}h${mins > 0 ? `${mins}m` : ""}`;
+	if (hours > 0) return `${hours}h${mins > 0 ? `${mins}m` : ""}`;
+	return `${mins}m`;
 }
 
 // One row: "<label> <bar> <pct>% (Reset <time>)" — pct and reset are omitted
@@ -188,15 +192,16 @@ process.stdin.on("end", async () => {
 	// header line and the tail warning can use it without a second fetch.
 	const proxyAlive = await checkProxyAlive(PROXY_PORT, cacheDir);
 
-	// Header: model + context window usage bar.
+	// Header: model name, then Ctx | 5H | 7D on one line, separated by │.
 	const modelName = input.model?.display_name || "Claude";
 	const ctxPct = input.context_window?.used_percentage ?? null;
-	lines.push(`${modelName} │ ${renderRow("Ctx", ctxPct, null)}`);
-
-	// Claude 5h / 7d usage-limit bars with reset time.
 	const rl = input.rate_limits;
-	lines.push(renderRow("5H ", rl?.five_hour?.used_percentage ?? null, rl?.five_hour?.resets_at));
-	lines.push(renderRow("7D ", rl?.seven_day?.used_percentage ?? null, rl?.seven_day?.resets_at));
+	const summary = [
+		renderRow("Ctx", ctxPct, null),
+		renderRow("5H", rl?.five_hour?.used_percentage ?? null, rl?.five_hour?.resets_at),
+		renderRow("7D", rl?.seven_day?.used_percentage ?? null, rl?.seven_day?.resets_at),
+	].join(` ${DIM}│${RESET} `);
+	lines.push(`${modelName} │ ${summary}`);
 
 	// GLM section — same bar style, no reset countdown (API doesn't return
 	// one), just the known window length.

@@ -3,7 +3,13 @@ import http from "node:http";
 import https from "node:https";
 import { forward } from "./proxy.js";
 import { rewriteModelForGlm } from "./rewrite.js";
-import { fupCooldownRemainingMs, isFupTripped, resolve, tripFupBreaker } from "./router.js";
+import {
+	clearFupBreaker,
+	fupCooldownRemainingMs,
+	isFupTripped,
+	resolve,
+	tripFupBreaker,
+} from "./router.js";
 import { stripAssistantThinking } from "./sanitize.js";
 
 function debug(...args) {
@@ -26,6 +32,16 @@ function handleStatus(res, config) {
 			cooldownRemainingMs: fupCooldownRemainingMs(),
 		},
 	});
+}
+
+// Clears a breaker that tripped on a false positive — see docs/OPERATIONS.md
+// §12.6. Restarting used to be the only way; the file it wrote to persists
+// state, but a running process never re-reads a file someone else edited.
+function handleClearFup(res) {
+	const wasTripped = isFupTripped();
+	clearFupBreaker();
+	console.log(`[fup-clear] manual reset via /_status/clear-fup (was tripped: ${wasTripped})`);
+	sendJson(res, 200, { cleared: true, wasTripped });
 }
 
 // Cheap substring sniff for use inside SSE data chunks where we don't have a
@@ -166,6 +182,10 @@ export function createServer(config) {
 
 			if (req.url === "/_status" && req.method === "GET") {
 				handleStatus(res, config);
+				return;
+			}
+			if (req.url === "/_status/clear-fup" && req.method === "POST") {
+				handleClearFup(res);
 				return;
 			}
 			handleProxy(req, res, parseJsonOrEmpty(bodyBuffer), bodyBuffer, config);
