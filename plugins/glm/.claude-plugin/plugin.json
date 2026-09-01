@@ -1,6 +1,6 @@
 {
 	"name": "glm",
-	"version": "0.5.2",
+	"version": "0.5.3",
 	"description": "GLM (Z.ai) integration for Claude Code — local proxy with manual /model switching and a FUP circuit breaker.",
 	"author": {
 		"name": "pyy0715"
