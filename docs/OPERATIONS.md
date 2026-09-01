@@ -67,9 +67,9 @@ Edit `settings.json` and Claude Code picks up the new `ANTHROPIC_BASE_URL` witho
 - Selecting it puts the ID string verbatim into the request's `model` field.
 - Claude Code **skips validation** on this ID, so any string passes.
 
-### 2.4 `"model": "glm-5.1"` without `ANTHROPIC_BASE_URL` → 400 "String should have at most 256 characters"
+### 2.4 `"model": "glm-5.3-flash"` without `ANTHROPIC_BASE_URL` → 400 "String should have at most 256 characters"
 
-If `settings.json` has `"model": "glm-5.1"` as the default but `ANTHROPIC_BASE_URL` is unset, Claude Code sends the request to `api.anthropic.com` directly, the API rejects it, and Claude Code's internal retry/fallback path corrupts the model string to >256 chars. Reproducible, root cause unidentified — looks like a Claude Code bug.
+If `settings.json` has `"model": "glm-5.3-flash"` as the default but `ANTHROPIC_BASE_URL` is unset, Claude Code sends the request to `api.anthropic.com` directly, the API rejects it, and Claude Code's internal retry/fallback path corrupts the model string to >256 chars. Reproducible, root cause unidentified — looks like a Claude Code bug.
 
 Workaround: don't leave a `"model": "glm-..."` default in settings.json without the proxy running. Pick it with `/model` inside the session instead.
 
@@ -106,7 +106,7 @@ Both fields are top-level. Claude Code's public docs called this field `user_pro
 
 ### 3.2 Hooks inherit `process.env`
 
-- Every value in the `env` block of `settings.json` is available to the hook and to the proxy it spawns (`GLM_HOOK_DEBUG`, `GLM_API_KEY`, etc).
+- Every value in the `env` block of `settings.json` is available to the hook and to the proxy it spawns (`GLM_API_KEY`, `GLM_DEBUG`, etc).
 - Confirmed via `ps -Ewwp <proxy_pid>`.
 
 ---
@@ -116,11 +116,12 @@ Both fields are top-level. Claude Code's public docs called this field `user_pro
 ```
 1. model.startsWith("claude-haiku-")  → Claude   (internal ops traffic)
 2. FUP breaker tripped ∧ glm-target   → Claude   (FUP 1313 recovery, §12)
-3. blocked session ∧ glm-target       → Claude   (reactive overflow learning)
-4. model.startsWith("glm-")           → GLM      (explicit user pick)
-5. model.startsWith("claude-")        → Claude   (default tier)
-6. config.defaultBackend              → final fallback
+3. model.startsWith("glm-")           → GLM      (explicit user pick)
+4. model.startsWith("claude-")        → Claude   (default tier)
+5. config.defaultBackend              → final fallback
 ```
+
+There used to be a rank between the FUP check and the explicit `glm-*` pick — a reactive session block that preempted GLM after a context overflow (see §10.3/§10.5, historical). GLM-5.3's native 1M-token context window removed the case it existed for, and it was removed along with `src/fallback.js` in the 0.5.0 cut.
 
 The rationale is in ARCHITECTURE §5. In practice:
 
@@ -226,7 +227,6 @@ Edit `~/.claude/plugins/cache/<name>/<plugin>/<version>/` directly for a one-off
 | `GLM_PROXY_LOG` | File the SessionStart hook redirects proxy stdout/stderr to. Default `/tmp/glm-proxy.log`. |
 | `GLM_PROXY_URL` | Where hooks reach the proxy. Default `http://localhost:4000`. |
 | `GLM_PROXY_READY_TIMEOUT_MS` | Readiness-poll ceiling for SessionStart. Default 3000. |
-| `GLM_BLOCK_TTL_MS` | How long a session stays blocked from GLM after a context overflow (§10.5). Default 600000 (10min). |
 
 ---
 
@@ -265,42 +265,30 @@ messages.1.content.0: Invalid `signature` in `thinking` block
 - Tests: `test/sanitize.test.js` (9 cases).
 - Logged on `GLM_DEBUG=1`: `stripped thinking blocks from assistant history`.
 
-### 10.3 Z.ai's context-overflow signaling (fixed)
+### 10.3 Z.ai's context-overflow signaling (historical — no longer applicable)
 
-**Discovered 2026-04-14.** Z.ai's Anthropic-compatible endpoint does **not** use `400 invalid_request_error` for window overflow. Instead:
+> **Removed in 0.5.0.** GLM-5.3 and later ship a native 1M-token context window, matching Claude's extended context, so a GLM-bound turn no longer has a smaller ceiling to overflow. `src/fallback.js` and the fallback branches it fed are gone. This section is kept as a historical record of the failure mode and how it was signaled, in case a deployment deliberately pins an older sub-1M GLM model and needs to reason about the same class of error.
+
+**Discovered 2026-04-14 (on GLM-5.1, 200K context).** Z.ai's Anthropic-compatible endpoint does **not** use `400 invalid_request_error` for window overflow. Instead:
 
 - **Non-streaming:** `status=200` with body `{"content":[], "stop_reason":"model_context_window_exceeded", "usage":{"input_tokens":0,"output_tokens":0}}`.
 - **Streaming (SSE):** `message_start` → `message_delta` (with `delta.stop_reason=model_context_window_exceeded`) → `message_stop`. No `content_block_start` — the model never starts generating.
 
 Claude Code's "The model has reached its context window limit" user-facing error is the client's synthesis from this `stop_reason`.
 
-**Fix:** bidirectional fallback in `src/fallback.js` + `src/server.js`:
-
-- Non-streaming: buffer the upstream body (1MB ceiling), check `isContextLimitByStopReason`, fall back to Claude if true.
-- Streaming: buffer the SSE prelude up to 64KB, feed it to `createSseDetector()`, decide `context_exceeded` / `normal` / keep-buffering. On exceed, discard the buffer and replay against Claude; on normal, flush and `pipe()`.
-- Before fallback, restore the inbound `body.model` (the rewritten `glm-5.1` would be rejected by Claude).
-- The 400 path stays in place as a second safety net (in case the endpoint changes behavior).
-
-Log line: `[ctx-fallback] <inboundModel> -> claude (glm 200 stop_reason: model_context_window_exceeded)`.
+**Former fix (removed):** bidirectional fallback in `src/fallback.js` + `src/server.js` — buffer the response, detect the sentinel `stop_reason`, and retry on Claude while restoring the inbound `body.model`. If you need this behavior again for a sub-1M GLM model, `git log` for the 0.5.0 removal commit has the full implementation to restore.
 
 ### 10.4 `/reload-plugins` in isolation
 
 `ANTHROPIC_BASE_URL` re-application happens without `/reload-plugins` (§2.2). What else `/reload-plugins` does on top remains untested.
 
-### 10.5 1M opt-in sessions and GLM overflow loops (fixed, 2026-04-15)
+### 10.5 1M opt-in sessions and GLM overflow loops (historical — removed in 0.5.0)
 
-**Discovered:** `/model claude-opus-4-6[1m]` tells Claude Code to treat the window as 1M (the `[1m]` suffix is detected by `has1mContext = /\[1m\]/i.test(model)` — confirmed from the `ultraworkers/claw-code` leak of CC's `src/utils/context.ts`). Auto-compact raises to ~987K. Once the session's context exceeds 200K, every CODE-classified turn triggers Z.ai's 200 + `model_context_window_exceeded` (§10.3), fallback retries on Claude, and next turn repeats the cycle. Context grows monotonically, so retrying is near-certain to overflow again — waste quota and latency every turn.
+> **Removed.** This entire failure mode no longer exists on GLM-5.3 and later: the model's native context window is 1M, the same order of magnitude as Claude's, so there's no overflow to loop on. Kept for history and as a pointer if a sub-1M GLM model is ever pinned again.
 
-**Fix — reactive session learning:**
+**Discovered (on GLM-5.1, 200K context):** `/model claude-opus-4-6[1m]` tells Claude Code to treat the window as 1M (the `[1m]` suffix is detected by `has1mContext = /\[1m\]/i.test(model)`). Auto-compact raises to ~987K. Once the session's context exceeds 200K, every CODE-classified turn triggered Z.ai's 200 + `model_context_window_exceeded` (§10.3), fallback retried on Claude, and next turn repeated the cycle. Context grows monotonically, so retrying was near-certain to overflow again — wasted quota and latency every turn.
 
-- `src/router.js` adds `blockedSessions: Map<sessionId, expiresAt>` (same GC-on-set as the hint map).
-- `src/server.js`'s three overflow branches (400 / 200 / SSE) call `markSessionBlocked(sid)` just before the Claude fallback.
-- `resolve()` checks the block before the hint. If block is active and the target is GLM (explicit `glm-*` or `hint.backend === "glm"`), route to Claude.
-- TTL `GLM_BLOCK_TTL_MS`, default 10min — `/clear` or `/compact` eventually clears the session and GLM becomes eligible again.
-
-**Savings:** one wasted GLM call per session is unavoidable (learning requires Z.ai's rejection). Every subsequent turn is skipped. No hard-coded thresholds, no language-specific branches.
-
-Log: `[session-block] sid=<8char> ttl=600000ms` (emitted right after the fallback line).
+**Former fix (removed) — reactive session learning:** `src/router.js` held a `blockedSessions: Map<sessionId, expiresAt>`; `src/server.js`'s overflow branches called `markSessionBlocked(sid)` before falling back to Claude; `resolve()` checked the block ahead of the model prefix. TTL was `GLM_BLOCK_TTL_MS`, default 10min. All of this was removed in 0.5.0 along with `src/fallback.js`.
 
 ### 10.6 Dead-proxy auto-recovery (fixed, 2026-04-15)
 
@@ -311,8 +299,6 @@ Log: `[session-block] sid=<8char> ttl=600000ms` (emitted right after the fallbac
 **Race limitation:** The respawn happens during SessionStart, before any API requests fire. If the proxy dies mid-session, recovery requires a new session (`/exit` + `/resume`) to retrigger SessionStart.
 
 **Visibility:** `plugins/glm/scripts/statusline.js` probes port 4000 with a 300ms timeout (1s cached). Down → bold-red `proxy down` at the end of the status line. Users see the state before hitting it.
-
-**Debug trace:** `GLM_HOOK_DEBUG=1` writes `proxy-health-start` / `proxy-health-done state=already-up|started|unreachable|missing-path` to `/tmp/glm-route-hook.log`.
 
 ---
 
@@ -352,7 +338,7 @@ The breaker is a **single global state**, not per-session. 1313 is an account fl
 
 ### 12.3 Control flow
 
-Proxy side, the 1313 detector lives in both `tryGlmNonStreaming` and `tryGlmStreaming` (non-200 path) next to the existing context-overflow logic.
+Proxy side, the 1313 detector lives in `forwardToGlm` (`src/server.js`): once the upstream status is ≥ 400, it sniffs the response body (bounded to 64KB) for the `1313` code before piping the rest through.
 
 ### 12.4 Observability
 
@@ -372,6 +358,6 @@ Breaker state is persisted to `/tmp/glm-fup-breaker.json` so it survives proxy r
 ### 12.7 Known limits
 
 - The **first** request that triggers 1313 still surfaces the error to the user — we can only trip the breaker after seeing the response.
-- A user who explicitly `/model glm-5.1` during the cooldown still gets routed to Claude. No escape hatch by design (1313 severity argues for caution).
+- A user who explicitly `/model glm-5.3-flash` during the cooldown still gets routed to Claude. No escape hatch by design (1313 severity argues for caution).
 - Substring detection in streams accepts a superset (e.g. `"code":13131` would false-positive match `"code":1313`). Z.ai's documented error codes don't collide, but this is a known limitation — see `test/fup-detection.test.js` for the pinned behavior.
 

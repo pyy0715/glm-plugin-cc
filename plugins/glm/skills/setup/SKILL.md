@@ -1,6 +1,6 @@
 ---
 name: setup
-description: One-time setup for the GLM plugin. Configures ANTHROPIC_BASE_URL, GLM_API_KEY, and GLM_PROXY_PATH in ~/.claude/settings.json so the SessionStart hook can auto-start the proxy and the UserPromptSubmit hook can route prompts. Invoke via /glm:setup.
+description: One-time setup for the GLM plugin. Configures ANTHROPIC_BASE_URL, GLM_API_KEY, and GLM_PROXY_PATH in ~/.claude/settings.json so the SessionStart hook can auto-start the proxy. Invoke via /glm:setup.
 ---
 
 # GLM plugin setup

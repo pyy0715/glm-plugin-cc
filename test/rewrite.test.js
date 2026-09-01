@@ -6,10 +6,10 @@ describe("rewriteModelForGlm", () => {
 	it("rewrites claude-* model to the configured GLM model", () => {
 		const body = { model: "claude-opus-4-6", messages: [] };
 		const { body: out, modified } = rewriteModelForGlm(body, {
-			targetModel: "glm-5.1",
+			targetModel: "glm-5.3-flash",
 		});
 		assert.equal(modified, true);
-		assert.equal(out.model, "glm-5.1");
+		assert.equal(out.model, "glm-5.3-flash");
 		// Original untouched
 		assert.equal(body.model, "claude-opus-4-6");
 	});
@@ -17,7 +17,7 @@ describe("rewriteModelForGlm", () => {
 	it("leaves glm-* model alone (user's explicit pick wins)", () => {
 		const body = { model: "glm-4.7", messages: [] };
 		const { body: out, modified } = rewriteModelForGlm(body, {
-			targetModel: "glm-5.1",
+			targetModel: "glm-5.3-flash",
 		});
 		assert.equal(modified, false);
 		assert.equal(out, body);
@@ -26,24 +26,24 @@ describe("rewriteModelForGlm", () => {
 	it("rewrites unknown / unprefixed model names", () => {
 		const body = { model: "something-else", messages: [] };
 		const { body: out, modified } = rewriteModelForGlm(body, {
-			targetModel: "glm-5.1",
+			targetModel: "glm-5.3-flash",
 		});
 		assert.equal(modified, true);
-		assert.equal(out.model, "glm-5.1");
+		assert.equal(out.model, "glm-5.3-flash");
 	});
 
 	it("rewrites when model field is missing", () => {
 		const body = { messages: [] };
 		const { body: out, modified } = rewriteModelForGlm(body, {
-			targetModel: "glm-5.1",
+			targetModel: "glm-5.3-flash",
 		});
 		assert.equal(modified, true);
-		assert.equal(out.model, "glm-5.1");
+		assert.equal(out.model, "glm-5.3-flash");
 	});
 
 	it("handles null body gracefully", () => {
 		const { body: out, modified } = rewriteModelForGlm(null, {
-			targetModel: "glm-5.1",
+			targetModel: "glm-5.3-flash",
 		});
 		assert.equal(modified, false);
 		assert.equal(out, null);
@@ -57,9 +57,9 @@ describe("rewriteModelForGlm", () => {
 			metadata: { user_id: "abc" },
 		};
 		const { body: out } = rewriteModelForGlm(body, {
-			targetModel: "glm-5.1",
+			targetModel: "glm-5.3-flash",
 		});
-		assert.equal(out.model, "glm-5.1");
+		assert.equal(out.model, "glm-5.3-flash");
 		assert.deepEqual(out.messages, body.messages);
 		assert.equal(out.max_tokens, 100);
 		assert.deepEqual(out.metadata, body.metadata);

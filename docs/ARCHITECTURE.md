@@ -40,12 +40,24 @@ Files: `src/server.js`, `src/router.js`, `src/proxy.js`, `src/config.js`, `bin/g
 
 ### Phase 3 — hook-based session safety
 
-Model-name routing alone (`/model glm-5.1` → GLM) requires manual switching every turn. The original hook included an auto-routing classifier, but it has been **removed** in favor of manual `/model` switching — users now explicitly select GLM when needed.
+Model-name routing alone (`/model glm-5.3-flash` → GLM) requires manual switching every turn. The original hook included an auto-routing classifier, but it has been **removed** in favor of manual `/model` switching — users now explicitly select GLM when needed.
 
 - `plugins/glm/hooks/session-start.js` spawns the proxy on demand via `ensureProxyRunning()` (shared module `proxy-lifecycle.js`).
 - `plugins/glm/skills/setup/SKILL.md` (`/glm:setup`) merges `ANTHROPIC_BASE_URL` / `GLM_API_KEY` / `GLM_PROXY_PATH` into `~/.claude/settings.json`.
 
 A block map keyed by `session_id` (10min TTL, see [Design decision: reactive session block](#8-reactive-session-block)) handles context-overflow learning.
+
+**Update (GLM-5.3):** GLM-5.3 and later ship a native 1M-token context window, matching Claude's extended context. The overflow problem this block existed to solve no longer applies, so Phase 3.5 below removes it.
+
+### Phase 3.5 — drop the context-overflow safety net
+
+GLM-5.1 topped out at 200K tokens against Claude's 1M, so Phase 3 added a reactive block: when GLM rejected a turn for exceeding its window, the proxy fell back to Claude and remembered the session for 10 minutes so subsequent turns skipped straight to Claude instead of repeating the same failing GLM call.
+
+GLM-5.3 and GLM-5.3-Flash ship a native 1,048,576-token context window — parity with Claude's 1M window — so a GLM-bound turn no longer has a smaller ceiling to hit. The safety net's reason for existing is gone, and removing it also removes real complexity: `src/fallback.js` (400/200/SSE overflow detection), the `blockedSessions` map and `markSessionBlocked`/`isSessionBlocked`/`clearBlockedSessions` in `src/router.js`, and the three overflow branches in `src/server.js`'s non-streaming and streaming request handlers.
+
+What's left after the cut is a much thinner request path: `resolve()` picks a backend from the model prefix and the FUP breaker state, and `forwardToGlm()` streams the response straight through, only sniffing error bodies for the FUP `1313` code. The FUP breaker itself is untouched — it's an account-level Z.ai policy signal, unrelated to context size.
+
+If you deliberately pin an older, sub-1M GLM model (`GLM_ROUTED_MODEL=glm-4.7`, for example), a turn that exceeds that model's window now fails outright instead of silently retrying on Claude. That's a conscious tradeoff: reintroducing the safety net for a model most users won't pin isn't worth the code it costs.
 
 ---
 
@@ -95,12 +107,11 @@ This is a **local** proxy (your own credentials, on your own machine), not a hos
 |---|---|---|
 | 1 | `claude-haiku-*` prefix | CC's own plumbing. Pin to Claude so GLM quota isn't wasted on ops traffic. |
 | 2 | FUP breaker tripped ∧ `glm-*` | Account-level flag recovery. |
-| 3 | Session block ∧ `glm-*` | Session already hit GLM overflow. Preempt to Claude until TTL expires. |
-| 4 | `glm-*` prefix | User picked GLM explicitly via `/model`. Always GLM (unless blocked). |
-| 5 | `claude-*` prefix | Default tier. |
-| 6 | `config.defaultBackend` | Final fallback, defaults to `claude`. |
+| 3 | `glm-*` prefix | User picked GLM explicitly via `/model`. Always GLM (unless FUP-throttled). |
+| 4 | `claude-*` prefix | Default tier. |
+| 5 | `config.defaultBackend` | Final fallback, defaults to `claude`. |
 
-**Why session-block outranks explicit `glm-*`:** A session that picked `glm-5.1` and then grew past GLM's 200K context window gets the same rejection whether you asked for it or not. Retrying wastes quota and latency. The block auto-clears on TTL so `/clear` or `/compact` re-enables GLM.
+There used to be a rank between the FUP check and the explicit `glm-*` pick — a session-block preemption for context overflow. GLM-5.3's native 1M-token window removed the case it existed for; see [Phase 3.5](#phase-35--drop-the-context-overflow-safety-net).
 
 ### 6. Registering GLM in `/model`
 
@@ -109,14 +120,16 @@ Claude Code's model picker rejects unknown IDs ("Model not found"). `ANTHROPIC_C
 ```json
 {
   "env": {
-    "ANTHROPIC_CUSTOM_MODEL_OPTION": "glm-5.1",
-    "ANTHROPIC_CUSTOM_MODEL_OPTION_NAME": "GLM-5.1",
-    "ANTHROPIC_CUSTOM_MODEL_OPTION_DESCRIPTION": "Z.ai GLM-5.1 (routed via glm-proxy)"
+    "ANTHROPIC_CUSTOM_MODEL_OPTION": "glm-5.3-flash",
+    "ANTHROPIC_CUSTOM_MODEL_OPTION_NAME": "GLM-5.3-Flash",
+    "ANTHROPIC_CUSTOM_MODEL_OPTION_DESCRIPTION": "Z.ai GLM-5.3-Flash (routed via glm-proxy)"
   }
 }
 ```
 
 Claude Code skips validation on this ID, so any string works. Only one custom option is allowed.
+
+Claude Code can also auto-discover gateway models from a `/v1/models` endpoint (`CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1`), but the discovery filter only keeps entries whose `id` contains `claude` or `anthropic` — a bare `glm-5.3-flash` id doesn't match, so discovery can't register GLM here. `ANTHROPIC_CUSTOM_MODEL_OPTION` stays the only path.
 
 ### 7. Statusline quota mapping
 
@@ -127,31 +140,7 @@ From Z.ai's official plugin (`zai-org/zai-coding-plugins`):
 
 The initial mapping swapped these; fixed after confirming against the official source.
 
-### 8. Reactive session block
-
-**Problem:** `/model claude-opus-4-6[1m]` tells Claude Code to treat the window as 1M (detected via the `/\[1m\]/i` pattern, confirmed from the `ultraworkers/claw-code` leak in `src/utils/context.ts`). Auto-compact pushes to ~987K. GLM still tops out at 200K, so once a session's accumulated context clears that line, every CODE-classified turn triggers Z.ai's `200 OK + stop_reason=model_context_window_exceeded`, fallback to Claude, retry next turn, same result. Context grows monotonically, so retrying is near-guaranteed to fail again.
-
-**Alternatives considered:**
-
-| | Reactive block (chosen) | Byte threshold | `[1m]` → Claude always |
-|---|---|---|---|
-| Hard-coded constants | none (TTL only) | needs tuning (~600KB?) | none |
-| Language/content bias | none | English-biased | none |
-| Adapts if Z.ai limit changes | automatic | manual retune | irrelevant |
-| Avoids the first overflow | ❌ unavoidable (1x) | ✅ | ✅ |
-| Subsequent turns | ✅ | ✅ | ✅ |
-| Small coding turns still on GLM | ✅ (until block fires) | ✅ | ❌ (everything to Claude) |
-
-**Design:**
-
-- `src/router.js` holds `blockedSessions: Map<sessionId, expiresAt>`, GC-on-set.
-- `src/server.js` calls `markSessionBlocked(sid)` from each of three overflow branches: 400 `isContextLimitError`, 200 `isContextLimitByStopReason`, and SSE `verdict === 'context_exceeded'`.
-- `resolve()` checks the block before the model prefix — if active and the request targets GLM, route to Claude.
-- TTL `GLM_BLOCK_TTL_MS`, default 10min — enough to survive a burst of turns, short enough for `/clear` / `/compact` to eventually re-enable GLM.
-
-**Tradeoff:** The first overflow per session still costs one wasted GLM call — the proxy learns from Z.ai's actual rejection, which only arrives after the request is sent. Every subsequent turn is saved. State lives in-memory only; a proxy restart resets it, which is fine (the first overflow re-teaches).
-
-### 9. Dead-proxy auto-recovery
+### 8. Dead-proxy auto-recovery
 
 If the proxy dies mid-session (dev reload, orphaned log inode, reboot), every open Claude Code session starts returning ECONNREFUSED until `/exit` + `/resume` retriggers SessionStart. UserPromptSubmit fires on every turn and is the natural recovery point.
 
@@ -174,17 +163,18 @@ These were verified empirically during Phases 2–3 and gate all subsequent desi
 - Hooks can curl `localhost`; hooks cannot share state with each other.
 
 **Proxy behavior**
-- `glm-5.1` → `api.z.ai`; `claude-opus-4-6` → `api.anthropic.com`.
+- `glm-5.3-flash` → `api.z.ai`; `claude-opus-4-6` → `api.anthropic.com`.
 - OAuth passthrough works for the Claude route.
 - SSE streaming passes through `pipe()` unchanged.
 - `/_status` reports proxy state, FUP breaker, and backend list.
-- `/model glm-5.1` requires `ANTHROPIC_CUSTOM_MODEL_OPTION`.
+- `/model glm-5.3-flash` requires `ANTHROPIC_CUSTOM_MODEL_OPTION`.
 
 **GLM API**
 - Endpoint for Coding Plan: `https://api.z.ai/api/anthropic/v1/messages` (the `api/paas/v4` endpoint returns 429 — requires a separate Standard top-up).
 - Auth: `x-api-key: $GLM_API_KEY` (Bearer is not the Anthropic shape).
-- Models: `glm-5.1`, `glm-5`, `glm-5-turbo`, `glm-4.7`, `glm-4.6`, `glm-4.5`, `glm-4.5-air`.
-- Quota weights: GLM-5.1 / 5 / 5-Turbo at 3× peak, 2× off-peak; GLM-4.7 at 1× (cheapest — used for the classifier).
+- Models: `glm-5.3-flash`, `glm-5.3`, `glm-5.1`, `glm-5`, `glm-5-turbo`, `glm-4.7`, `glm-4.6`, `glm-4.5`, `glm-4.5-air`.
+- GLM-5.3 and GLM-5.3-Flash support a 1,048,576-token (1M) context window; earlier GLM versions (5.1 and before) top out at 200K.
+- Quota weights vary by tier — check your Z.ai plan for current weights.
 - Quota endpoint: `GET https://api.z.ai/api/monitor/usage/quota/limit` (accepts `Authorization`, `x-api-key`, or `Bearer`).
 
 ---
@@ -215,13 +205,13 @@ These were verified empirically during Phases 2–3 and gate all subsequent desi
 
 - Z.ai Coding Plan FAQ: `https://docs.z.ai/devpack/faq`
 - Z.ai Claude Code config: `https://docs.z.ai/devpack/tool/claude`
-- Z.ai GLM-5.1 usage: `https://docs.z.ai/devpack/using5.1`
+- Z.ai model switching guide: `https://docs.z.ai/devpack/latest-model`
 - Z.ai best practices: `https://docs.z.ai/devpack/resources/best-practice`
 - GLM OpenAPI spec: `https://docs.bigmodel.cn/openapi/openapi.json`
 - Claude Code hooks: `https://code.claude.com/docs/en/hooks`
 - Claude Code model config: `https://code.claude.com/docs/en/model-config`
+- Claude Code LLM gateway protocol: `https://code.claude.com/docs/en/llm-gateway-protocol`
 - Anthropic SDK (TypeScript): `https://github.com/anthropics/anthropic-sdk-typescript`
-- Leaked Claude Code source (used as the authoritative reference for internal prompt structure and `[1m]` detection): `https://github.com/ultraworkers/claw-code`
 
 ---
 
@@ -233,12 +223,11 @@ glm-plugin-cc/
 │   └── glm-proxy.js                CLI entry point
 ├── src/
 │   ├── config.js                   env loader
-│   ├── router.js                   session block + FUP breaker + resolve()
-│   ├── proxy.js                    upstream piping + OAuth passthrough
-│   ├── server.js                   HTTP server (/v1/messages, /_status)
+│   ├── router.js                   FUP breaker + resolve()
+│   ├── proxy.js                    upstream piping + OAuth passthrough (Claude route)
+│   ├── server.js                   HTTP server (/v1/messages, /_status), GLM forwarding + FUP sniff
 │   ├── sanitize.js                 strips thinking/redacted_thinking from history
-│   ├── rewrite.js                  rewrites model field for GLM route
-│   └── fallback.js                 context-overflow detector (400 + 200+stop_reason + SSE)
+│   └── rewrite.js                  rewrites model field for GLM route
 ├── plugins/glm/                    ← cache copies only this subtree
 │   ├── .claude-plugin/
 │   │   └── plugin.json             version is the cache key; bump to invalidate
@@ -266,21 +255,21 @@ glm-plugin-cc/
 - Phase 2 — proxy + routing core (0.3.x)
 - Phase 3 — classifier + hook auto-routing + `/glm:setup` (0.4.0)
 - Thinking-block strip for cross-backend signature safety (0.4.0)
-- Model rewrite to `glm-5.1` on GLM route (0.4.0)
-- Context-overflow fallback, non-stream + streaming (0.4.0)
+- Model rewrite to the configured GLM model on GLM route (0.4.0)
+- Context-overflow fallback, non-stream + streaming (0.4.0, removed in 0.5.0)
 - Classifier redesign — production vs. conversation intent (0.4.1)
-- Reactive session block for overflow learning (0.4.2)
+- Reactive session block for overflow learning (0.4.2, removed in 0.5.0)
 - Dead-proxy auto-recovery via UserPromptSubmit (0.4.2)
 - `proxy down` indicator on statusline (0.4.2)
 - Manual-only GLM routing (classifier removed)
+- Phase 3.5 — drop context-overflow safety net now that GLM-5.3 ships a native 1M context window (0.5.0)
 
 **Open**
 - Investigate the ~20s lag when switching models mid-session.
 
 **Candidates (build if demanded)**
 - Multi-entry `ANTHROPIC_CUSTOM_MODEL_OPTION` if Claude Code ever supports it.
-- Auto-select GLM-5.1 vs GLM-4.7 by request complexity.
-- Auto-fallback to Claude when the GLM quota is exhausted.
+- Auto-select among GLM tiers by request complexity.
 - Richer statusline fed by proxy response metadata.
 
 **Explicitly out of scope**
@@ -288,3 +277,4 @@ glm-plugin-cc/
 - Self-written `--detach` — same reason.
 - Plugin-skill path (`/glm:task`) — superseded by the proxy (commit 34e19bf).
 - Full TypeScript — `// @ts-check` + JSDoc is enough here, YAGNI.
+- Context-overflow fallback — superseded by GLM-5.3's native 1M context window (see [Phase 3.5](#phase-35--drop-the-context-overflow-safety-net)). Would only be worth reviving for a deployment deliberately pinned to a sub-1M GLM model.

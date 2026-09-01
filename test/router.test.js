@@ -1,12 +1,9 @@
 import { strict as assert } from "node:assert";
 import { beforeEach, describe, it } from "node:test";
 import {
-	clearBlockedSessions,
 	clearFupBreaker,
 	fupCooldownRemainingMs,
 	isFupTripped,
-	isSessionBlocked,
-	markSessionBlocked,
 	resolve,
 	tripFupBreaker,
 } from "../src/router.js";
@@ -20,89 +17,34 @@ const config = {
 	},
 };
 
-function metaFor(sessionId) {
-	return {
-		user_id: JSON.stringify({
-			device_id: "dev",
-			account_uuid: "acc",
-			session_id: sessionId,
-		}),
-	};
-}
-
 describe("router", () => {
 	beforeEach(() => {
-		clearBlockedSessions();
 		clearFupBreaker();
 	});
 
 	it("routes glm-* models to GLM", () => {
-		const backend = resolve("glm-5.1", undefined, config);
+		const backend = resolve("glm-5.3-flash", config);
 		assert.equal(backend.name, "glm");
 	});
 
 	it("routes claude-* models to Claude", () => {
-		const backend = resolve("claude-opus-4-6", undefined, config);
+		const backend = resolve("claude-opus-4-6", config);
 		assert.equal(backend.name, "claude");
 	});
 
 	it("routes claude-haiku-* to Claude always", () => {
-		const backend = resolve("claude-haiku-4-6", undefined, config);
+		const backend = resolve("claude-haiku-4-6", config);
 		assert.equal(backend.name, "claude");
 	});
 
 	it("uses default backend when model is unknown", () => {
-		const backend = resolve("unknown-model", undefined, config);
+		const backend = resolve("unknown-model", config);
 		assert.equal(backend.name, "claude");
 	});
 
 	it("uses default backend when model is undefined", () => {
-		const backend = resolve(undefined, undefined, config);
+		const backend = resolve(undefined, config);
 		assert.equal(backend.name, "claude");
-	});
-
-	describe("session blocking", () => {
-		it("blocked session with glm-* model routes to Claude", () => {
-			markSessionBlocked("sessA");
-			const backend = resolve("glm-5.1", metaFor("sessA"), config);
-			assert.equal(backend.name, "claude");
-		});
-
-		it("blocked session with claude-* model still routes to Claude", () => {
-			markSessionBlocked("sessA");
-			const backend = resolve("claude-opus-4-6", metaFor("sessA"), config);
-			assert.equal(backend.name, "claude");
-		});
-
-		it("block is isolated per session", () => {
-			markSessionBlocked("sessA");
-			const a = resolve("glm-5.1", metaFor("sessA"), config);
-			const b = resolve("glm-5.1", metaFor("sessB"), config);
-			assert.equal(a.name, "claude");
-			assert.equal(b.name, "glm");
-		});
-
-		it("expired block auto-clears and allows GLM again", () => {
-			markSessionBlocked("sessA", 1);
-			const start = Date.now();
-			while (Date.now() - start < 5) {}
-			const backend = resolve("glm-5.1", metaFor("sessA"), config);
-			assert.equal(backend.name, "glm");
-			assert.equal(isSessionBlocked("sessA"), false);
-		});
-
-		it("clearBlockedSessions() resets all", () => {
-			markSessionBlocked("sessA");
-			markSessionBlocked("sessB");
-			clearBlockedSessions();
-			assert.equal(isSessionBlocked("sessA"), false);
-			assert.equal(isSessionBlocked("sessB"), false);
-		});
-
-		it("markSessionBlocked is a no-op for empty sessionId", () => {
-			markSessionBlocked("");
-			assert.equal(isSessionBlocked(""), false);
-		});
 	});
 
 	describe("FUP circuit breaker", () => {
@@ -114,13 +56,13 @@ describe("router", () => {
 		it("tripping routes glm-* to Claude", () => {
 			tripFupBreaker();
 			assert.equal(isFupTripped(), true);
-			const backend = resolve("glm-5.1", metaFor("sessA"), config);
+			const backend = resolve("glm-5.3-flash", config);
 			assert.equal(backend.name, "claude");
 		});
 
 		it("tripping does not affect claude-* requests", () => {
 			tripFupBreaker();
-			const backend = resolve("claude-opus-4-6", metaFor("sessA"), config);
+			const backend = resolve("claude-opus-4-6", config);
 			assert.equal(backend.name, "claude");
 		});
 
@@ -128,7 +70,7 @@ describe("router", () => {
 			tripFupBreaker();
 			clearFupBreaker();
 			assert.equal(isFupTripped(), false);
-			const backend = resolve("glm-5.1", metaFor("sessA"), config);
+			const backend = resolve("glm-5.3-flash", config);
 			assert.equal(backend.name, "glm");
 		});
 

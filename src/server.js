@@ -1,22 +1,10 @@
 // @ts-check
 import http from "node:http";
 import https from "node:https";
-import { createSseDetector, isContextLimitByStopReason, isContextLimitError } from "./fallback.js";
 import { forward } from "./proxy.js";
 import { rewriteModelForGlm } from "./rewrite.js";
-import {
-	DEFAULT_BLOCK_TTL_MS,
-	extractSessionId,
-	fupCooldownRemainingMs,
-	isFupTripped,
-	markSessionBlocked,
-	resolve,
-	tripFupBreaker,
-} from "./router.js";
+import { fupCooldownRemainingMs, isFupTripped, resolve, tripFupBreaker } from "./router.js";
 import { stripAssistantThinking } from "./sanitize.js";
-
-const NON_STREAM_BUFFER_LIMIT = 1024 * 1024;
-const STREAM_PEEK_LIMIT = 64 * 1024;
 
 function debug(...args) {
 	if (process.env.GLM_DEBUG) console.log(...args);
@@ -25,11 +13,6 @@ function debug(...args) {
 function sendJson(res, status, payload) {
 	res.writeHead(status, { "content-type": "application/json" });
 	res.end(JSON.stringify(payload));
-}
-
-function writeBufferedResponse(clientRes, status, headers, bodyBuffer) {
-	clientRes.writeHead(status, headers);
-	clientRes.end(bodyBuffer);
 }
 
 function handleStatus(res, config) {
@@ -45,20 +28,6 @@ function handleStatus(res, config) {
 	});
 }
 
-// Z.ai error code 1313 = Fair Usage Policy flag (account-level). Trip the
-// breaker so resolve() drains GLM-bound traffic until the quiet window
-// elapses. Accepts numeric or string codes; Z.ai has historically used both.
-export function maybeTripOnFupError(parsed, label) {
-	const code = parsed?.error?.code;
-	if (code === 1313 || code === "1313") {
-		tripFupBreaker();
-		const msg = String(parsed?.error?.message || "").slice(0, 120);
-		console.log(`  glm 1313 FUP tripped (${label}): ${msg}`);
-		return true;
-	}
-	return false;
-}
-
 // Cheap substring sniff for use inside SSE data chunks where we don't have a
 // fully-parsed JSON body. Both forms have been observed in Z.ai responses.
 // False positives are bounded: prelude window is ≤ 64KB, user content rarely
@@ -67,259 +36,84 @@ export function looksLike1313(text) {
 	return text.includes('"code":1313') || text.includes('"code":"1313"');
 }
 
-function buildHeaders(backend, sourceHeaders, bodyLength, hostname) {
-	/** @type {Record<string, string | string[] | undefined>} */
-	let headers;
-	if (backend.name === "claude") {
-		headers = { ...sourceHeaders };
-	} else {
-		const { authorization: _, ...rest } = sourceHeaders;
-		headers = { ...rest, "x-api-key": backend.apiKey };
-	}
-	headers.host = hostname;
-	headers["anthropic-version"] = headers["anthropic-version"] || "2023-06-01";
-	headers["content-length"] = String(bodyLength);
-	return headers;
-}
+const FUP_SNIFF_LIMIT = 64 * 1024;
 
-// Restore the user's original model so the Claude backend accepts the body
-// after we rewrote it to glm-5.1 for the GLM attempt.
-function buildFallbackBuffer(outboundBody, inboundModel) {
-	const { model: _dropped, ...rest } = outboundBody ?? {};
-	const restored = inboundModel ? { ...rest, model: inboundModel } : rest;
-	return Buffer.from(JSON.stringify(restored));
-}
-
-function parseMaybeJson(buffer) {
-	try {
-		return JSON.parse(buffer.toString());
-	} catch {
-		return null;
-	}
-}
-
-function forwardToClaude(clientReq, clientRes, config, outboundBody, inboundModel, reason) {
-	const fallbackBuffer = buildFallbackBuffer(outboundBody, inboundModel);
-	console.log(`[ctx-fallback] ${inboundModel || "unknown"} -> claude (${reason})`);
-	forward(clientReq, clientRes, config.backends.claude, fallbackBuffer);
-}
-
-// Record the overflowing session so subsequent GLM-bound turns from the same
-// session skip the wasted GLM round-trip (router preempts them to Claude).
-function recordOverflowAndFallback(
-	clientReq,
-	clientRes,
-	config,
-	outboundBody,
-	inboundModel,
-	reason,
-) {
-	const sid = extractSessionId(outboundBody?.metadata);
-	if (sid) {
-		markSessionBlocked(sid);
-		console.log(`[session-block] sid=${sid.slice(0, 8)} ttl=${DEFAULT_BLOCK_TTL_MS}ms`);
-	}
-	forwardToClaude(clientReq, clientRes, config, outboundBody, inboundModel, reason);
-}
-
-function glmRequestOptions(clientReq, backend, outboundBuffer) {
+/**
+ * Forward a request to GLM, watching the response only far enough to trip
+ * the FUP breaker on a 1313 error. Once past that check (or once the sniff
+ * window is exhausted), the rest of the response — including the entire
+ * body for streaming replies — is piped straight to the client unmodified.
+ *
+ * GLM-5.3 and later carry a 1M-token context window, matching Claude's
+ * extended context, so there is no overflow case to detect or fall back
+ * from here anymore — see docs/ARCHITECTURE.md.
+ */
+function forwardToGlm(clientReq, clientRes, backend, outboundBuffer) {
 	const url = new URL(backend.baseUrl + clientReq.url);
 	const proto = url.protocol === "https:" ? https : http;
-	return {
-		proto,
-		options: {
+
+	const { authorization: _auth, ...rest } = clientReq.headers;
+	const headers = {
+		...rest,
+		"x-api-key": backend.apiKey,
+		host: url.hostname,
+		"anthropic-version": clientReq.headers["anthropic-version"] || "2023-06-01",
+		"content-length": String(outboundBuffer.length),
+	};
+
+	const upstream = proto.request(
+		{
 			hostname: url.hostname,
 			port: url.port || (url.protocol === "https:" ? 443 : 80),
 			path: url.pathname,
 			method: clientReq.method,
-			headers: buildHeaders(backend, clientReq.headers, outboundBuffer.length, url.hostname),
+			headers,
 		},
-	};
-}
+		(upstreamRes) => {
+			const status = upstreamRes.statusCode || 502;
 
-function onUpstreamError(clientRes) {
-	return (err) => {
+			if (status < 400) {
+				clientRes.writeHead(status, upstreamRes.headers);
+				upstreamRes.pipe(clientRes);
+				return;
+			}
+
+			// Error response: sniff a bounded prefix for the FUP code before
+			// piping the rest through untouched. We still forward the full
+			// body to the client either way — this only decides whether we
+			// also trip the breaker.
+			clientRes.writeHead(status, upstreamRes.headers);
+			let sniffed = 0;
+			let sniffText = "";
+			let tripped = false;
+
+			upstreamRes.on("data", (chunk) => {
+				if (!tripped && sniffed < FUP_SNIFF_LIMIT) {
+					sniffText += chunk.toString("utf8");
+					sniffed += chunk.length;
+					if (looksLike1313(sniffText)) {
+						tripFupBreaker();
+						console.log("  glm 1313 FUP tripped (error response)");
+						tripped = true;
+					}
+				}
+				clientRes.write(chunk);
+			});
+			upstreamRes.on("end", () => clientRes.end());
+		},
+	);
+
+	upstream.on("error", (err) => {
 		if (!clientRes.headersSent) {
 			sendJson(clientRes, 502, { error: { message: `Upstream error: ${err.message}` } });
 		}
-	};
-}
-
-function tryGlmNonStreaming(
-	clientReq,
-	clientRes,
-	outboundBody,
-	outboundBuffer,
-	inboundModel,
-	config,
-) {
-	const { proto, options } = glmRequestOptions(clientReq, config.backends.glm, outboundBuffer);
-
-	const upstream = proto.request(options, (upstreamRes) => {
-		const status = upstreamRes.statusCode || 502;
-		const chunks = [];
-		let total = 0;
-		let truncated = false;
-
-		upstreamRes.on("data", (chunk) => {
-			total += chunk.length;
-			if (total > NON_STREAM_BUFFER_LIMIT) {
-				truncated = true;
-				return;
-			}
-			chunks.push(chunk);
-		});
-
-		upstreamRes.on("end", () => {
-			const bodyBuf = Buffer.concat(chunks);
-			if (truncated) {
-				writeBufferedResponse(clientRes, status, upstreamRes.headers, bodyBuf);
-				return;
-			}
-			const parsed = parseMaybeJson(bodyBuf);
-
-			if (isContextLimitError(status, parsed)) {
-				const snippet = String(parsed?.error?.message || "").slice(0, 80);
-				recordOverflowAndFallback(
-					clientReq,
-					clientRes,
-					config,
-					outboundBody,
-					inboundModel,
-					`glm 400: ${snippet}`,
-				);
-				return;
-			}
-			if (status === 200 && isContextLimitByStopReason(parsed)) {
-				recordOverflowAndFallback(
-					clientReq,
-					clientRes,
-					config,
-					outboundBody,
-					inboundModel,
-					"glm 200 stop_reason: model_context_window_exceeded",
-				);
-				return;
-			}
-			if (status >= 400) {
-				maybeTripOnFupError(parsed, "non-stream");
-				if (parsed?.error?.message) {
-					console.log(
-						`  glm ${status} (no fallback): ${String(parsed.error.message).slice(0, 160)}`,
-					);
-				}
-			}
-			writeBufferedResponse(clientRes, status, upstreamRes.headers, bodyBuf);
-		});
 	});
-
-	upstream.on("error", onUpstreamError(clientRes));
-	upstream.write(outboundBuffer);
-	upstream.end();
-}
-
-function tryGlmStreaming(clientReq, clientRes, outboundBody, outboundBuffer, inboundModel, config) {
-	const { proto, options } = glmRequestOptions(clientReq, config.backends.glm, outboundBuffer);
-
-	const upstream = proto.request(options, (upstreamRes) => {
-		const status = upstreamRes.statusCode || 502;
-
-		// Non-200 streaming replies aren't streams at all — buffer and reuse
-		// the same context-limit / passthrough logic the non-stream path has.
-		if (status !== 200) {
-			const chunks = [];
-			upstreamRes.on("data", (c) => chunks.push(c));
-			upstreamRes.on("end", () => {
-				const bodyBuf = Buffer.concat(chunks);
-				const parsed = parseMaybeJson(bodyBuf);
-				if (isContextLimitError(status, parsed)) {
-					const snippet = String(parsed?.error?.message || "").slice(0, 80);
-					recordOverflowAndFallback(
-						clientReq,
-						clientRes,
-						config,
-						outboundBody,
-						inboundModel,
-						`glm 400: ${snippet}`,
-					);
-					return;
-				}
-				if (status >= 400) {
-					maybeTripOnFupError(parsed, "stream");
-				}
-				writeBufferedResponse(clientRes, status, upstreamRes.headers, bodyBuf);
-			});
-			return;
-		}
-
-		// 200 SSE: buffer the prelude until the detector commits. We cannot
-		// write to the client before committing, because once writeHead fires
-		// we can't roll back to the Claude fallback.
-		const detector = createSseDetector();
-		const prelude = [];
-		let preludeBytes = 0;
-		let committed = false;
-
-		function commitPassthrough() {
-			if (committed) return;
-			committed = true;
-			clientRes.writeHead(200, upstreamRes.headers);
-			for (const chunk of prelude) clientRes.write(chunk);
-			upstreamRes.pipe(clientRes);
-		}
-
-		upstreamRes.on("data", (chunk) => {
-			if (committed) return;
-			const text = chunk.toString("utf8");
-			const verdict = detector.feed(text);
-
-			if (verdict === "context_exceeded") {
-				upstreamRes.destroy();
-				recordOverflowAndFallback(
-					clientReq,
-					clientRes,
-					config,
-					outboundBody,
-					inboundModel,
-					"glm stream stop_reason: model_context_window_exceeded",
-				);
-				return;
-			}
-
-			// Z.ai sometimes returns 200 + SSE `event: error` carrying a 1313.
-			// Detect in the prelude window (before committing to passthrough)
-			// so we still trip the breaker; the bytes are passed through so
-			// the user sees the actual error message once.
-			if (!committed && looksLike1313(text)) {
-				tripFupBreaker();
-				console.log("  glm 1313 FUP tripped (200-stream prelude)");
-			}
-
-			prelude.push(chunk);
-			preludeBytes += chunk.length;
-
-			if (verdict === "normal" || preludeBytes > STREAM_PEEK_LIMIT) {
-				commitPassthrough();
-			}
-		});
-
-		upstreamRes.on("end", () => {
-			if (!committed) commitPassthrough();
-		});
-		upstreamRes.on("error", () => {
-			if (!committed && !clientRes.headersSent) {
-				sendJson(clientRes, 502, { error: { message: "upstream stream error" } });
-			}
-		});
-	});
-
-	upstream.on("error", onUpstreamError(clientRes));
 	upstream.write(outboundBuffer);
 	upstream.end();
 }
 
 function handleProxy(req, res, body, bodyBuffer, config) {
-	const backend = resolve(body.model, body.metadata, config);
+	const backend = resolve(body.model, config);
 	const inboundModel = body.model || "unknown";
 
 	const stripped = stripAssistantThinking(body);
@@ -348,8 +142,7 @@ function handleProxy(req, res, body, bodyBuffer, config) {
 	const outboundBuffer = outboundModified ? Buffer.from(JSON.stringify(outboundBody)) : bodyBuffer;
 
 	if (backend.name === "glm") {
-		const run = body?.stream === true ? tryGlmStreaming : tryGlmNonStreaming;
-		run(req, res, outboundBody, outboundBuffer, body.model, config);
+		forwardToGlm(req, res, backend, outboundBuffer);
 		return;
 	}
 

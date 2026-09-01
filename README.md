@@ -4,7 +4,7 @@ Claude Code plugin + local proxy that lets you use [GLM (Z.ai)](https://z.ai) an
 
 ## Why this exists
 
-I pay for both a Claude Pro/Max subscription and a Z.ai Coding Plan (GLM-5.1). Using both meant `/model`-switching by hand on every turn, or giving up one entirely.
+I pay for both a Claude Pro/Max subscription and a Z.ai Coding Plan (GLM-5.3-Flash). Using both meant `/model`-switching by hand on every turn, or giving up one entirely.
 
 Existing Claude Code proxies don't solve this well:
 
@@ -13,31 +13,29 @@ Existing Claude Code proxies don't solve this well:
 - Many depend on **litellm**, which had a credential-stealing supply-chain compromise on PyPI (2026-03-24, v1.82.8) and a trail of SSRF/RCE CVEs.
 - **Third-party hosted proxies** share credentials across users, violating ToS and eating quota opaquely.
 
-This plugin is a **local proxy + Claude Code hook** that makes GLM a first-class model inside Claude Code. You pick the model with `/model`; the proxy handles auth, context-overflow fallback, and safety. Zero runtime dependencies, runs only on your machine, uses your own credentials.
+This plugin is a **local proxy + Claude Code hook** that makes GLM a first-class model inside Claude Code. You pick the model with `/model`; the proxy handles auth and routing. Zero runtime dependencies, runs only on your machine, uses your own credentials.
 
 ## How it compares
 
-| Project | Approach | Dual-backend | Context overflow safety | Dependencies |
-|---|---|---|---|---|
-| **glm-plugin-cc** (this) | hook + local proxy | ✅ same session | ✅ auto-fallback to Claude | 0 |
-| [zai-org/zai-coding-plugins](https://github.com/zai-org/zai-coding-plugins) (official) | env vars only | ❌ GLM-only | ❌ | 0 |
-| [starbaser/ccproxy](https://github.com/starbaser/ccproxy) | LiteLLM | ✅ | ❌ | LiteLLM |
-| [1rgs/claude-code-proxy](https://github.com/1rgs/claude-code-proxy) | LiteLLM | ✅ | ❌ | LiteLLM |
-| [fuergaosi233/claude-code-proxy](https://github.com/fuergaosi233/claude-code-proxy) | plain proxy | ✅ | ❌ | 0 |
-| [Portkey-AI/gateway](https://github.com/Portkey-AI/gateway) | AI gateway | ✅ | ❌ | gateway |
-| [openai/codex-plugin-cc](https://github.com/openai/codex-plugin-cc) | CLI wrapper | ❌ | — | Codex CLI |
+| Project | Approach | Dual-backend | Dependencies |
+|---|---|---|---|
+| **glm-plugin-cc** (this) | hook + local proxy | ✅ same session | 0 |
+| [zai-org/zai-coding-plugins](https://github.com/zai-org/zai-coding-plugins) (official) | env vars only | ❌ GLM-only | 0 |
+| [starbaser/ccproxy](https://github.com/starbaser/ccproxy) | LiteLLM | ✅ | LiteLLM |
+| [1rgs/claude-code-proxy](https://github.com/1rgs/claude-code-proxy) | LiteLLM | ✅ | LiteLLM |
+| [fuergaosi233/claude-code-proxy](https://github.com/fuergaosi233/claude-code-proxy) | plain proxy | ✅ | 0 |
+| [Portkey-AI/gateway](https://github.com/Portkey-AI/gateway) | AI gateway | ✅ | gateway |
+| [openai/codex-plugin-cc](https://github.com/openai/codex-plugin-cc) | CLI wrapper | ❌ | Codex CLI |
 
 What makes this plugin different:
 
-- **Same-session model switching.** `/model glm-5.1` and `/model opus` work without restarting the session. Z.ai's official plugin can't do this — it's GLM-only.
-- **Context-overflow fallback.** GLM has a 200K context window vs Claude's 1M. When GLM rejects a turn, the proxy automatically retries on Claude — your turn isn't lost.
+- **Same-session model switching.** `/model glm-5.3-flash` and `/model opus` work without restarting the session. Z.ai's official plugin can't do this — it's GLM-only.
 
 ## Key properties
 
-- **Manual `/model` switching** — you decide which backend to use. `/model glm-5.1` for GLM, `/model opus` for Claude.
+- **Manual `/model` switching** — you decide which backend to use. `/model glm-5.3-flash` for GLM, `/model opus` for Claude.
 - **Internal haiku calls always go to Claude** so Claude Code's title/summary plumbing doesn't burn GLM quota.
 - **Thinking blocks stripped from history** before forwarding, so backends don't reject each other's signatures when you switch mid-session.
-- **Context-overflow aware** — when GLM rejects a turn with `model_context_window_exceeded` (common on `claude-opus-4-6[1m]` sessions that grow past GLM's 200K limit), the proxy automatically falls back to Claude and records the session. Subsequent GLM-bound turns skip the wasted round-trip for 10 minutes.
 - **FUP circuit breaker** — if Z.ai returns error `1313` (Fair Usage Policy flag), the proxy drains all GLM-target traffic to Claude for 1 hour, letting the quiet window elapse. State is surfaced as `glm throttled (Nm)` in the statusline.
 - **Proxy auto-start** — the SessionStart hook spawns the proxy on demand. If it crashes mid-session, restart with `/exit` + `/resume`.
 - **OAuth token passthrough** — Claude-routed requests reuse your Claude Code OAuth header unchanged. GLM-routed requests swap it for `x-api-key: $GLM_API_KEY`.
@@ -47,23 +45,19 @@ What makes this plugin different:
 
 - **macOS/Linux verified; Windows untested.**
 - **Z.ai Coding Plan only.** The Standard GLM API (`api/paas/v4`) returns 429 — this plugin targets `https://api.z.ai/api/anthropic/v1/messages`.
-- **First context-overflow turn per session is unavoidable.** The reactive block learns from GLM's actual rejection — the first overflowing turn still makes one wasted GLM call. Every subsequent turn in that session is saved.
-- **Relies on Claude Code internals that aren't public API.** `body.metadata.user_id` stringified JSON, the `[1m]` suffix, internal `claude-haiku-*` for plumbing. May drift across Claude Code releases.
+- **Relies on Claude Code internals that aren't public API.** Internal `claude-haiku-*` model names for plumbing. May drift across Claude Code releases.
 - **No proxy respawn mid-session.** If the proxy dies mid-session, you need `/exit` + `/resume` to trigger SessionStart again. (Previous versions had a UserPromptSubmit hook for this; it was removed with the classifier.)
+- **No context-overflow safety net.** Earlier GLM models (5.1 and before) topped out at 200K tokens, well under Claude's 1M, so this plugin used to fall back to Claude when GLM rejected an overlong turn. GLM-5.3 and later ship a native 1M-token context window — parity with Claude's extended context — so that fallback no longer applies and has been removed. If you deliberately pin an older sub-1M GLM model, a turn that exceeds its window now fails instead of silently retrying on Claude.
 
 ## How it works
 
 ```
 User → Claude Code → proxy (:4000) → GLM or Claude
                         │
-                        ├─ model starts with "glm-"?  → GLM (unless blocked)
+                        ├─ model starts with "glm-"?  → GLM (unless FUP-throttled)
                         ├─ model starts with "claude-"? → Claude
                         ├─ internal haiku?              → Claude (always)
                         └─ FUP breaker tripped?         → Claude
-
-If GLM rejects (overflow or error):
-  → proxy records session block, retries on Claude
-  → next GLM-bound turns skip to Claude for 10 min
 ```
 
 ## Installation
@@ -95,11 +89,11 @@ The skill merges three keys into `~/.claude/settings.json` under `env`:
 
 After setup, use Claude Code normally. Switch backends with `/model`:
 
-- `/model glm-5.1` — route to GLM
+- `/model glm-5.3-flash` — route to GLM
 - `/model opus` — route to Claude
 - `/model sonnet` — route to Claude
 
-The proxy handles the rest — auth headers, model rewriting, overflow fallback. Routing decisions land in `/tmp/glm-proxy.log` (set `GLM_DEBUG=1` under `env` for extra detail).
+The proxy handles the rest — auth headers, model rewriting. Routing decisions land in `/tmp/glm-proxy.log` (set `GLM_DEBUG=1` under `env` for extra detail).
 
 ## `/model` picker — register GLM
 
@@ -108,14 +102,14 @@ The proxy handles the rest — auth headers, model rewriting, overflow fallback.
 ```json
 {
   "env": {
-    "ANTHROPIC_CUSTOM_MODEL_OPTION": "glm-5.1",
-    "ANTHROPIC_CUSTOM_MODEL_OPTION_NAME": "GLM-5.1",
-    "ANTHROPIC_CUSTOM_MODEL_OPTION_DESCRIPTION": "Z.ai GLM-5.1 (routed via glm-proxy)"
+    "ANTHROPIC_CUSTOM_MODEL_OPTION": "glm-5.3-flash",
+    "ANTHROPIC_CUSTOM_MODEL_OPTION_NAME": "GLM-5.3-Flash",
+    "ANTHROPIC_CUSTOM_MODEL_OPTION_DESCRIPTION": "Z.ai GLM-5.3-Flash (routed via glm-proxy)"
   }
 }
 ```
 
-Available GLM models: `glm-5.1`, `glm-5`, `glm-5-turbo`, `glm-4.7`, `glm-4.6`, `glm-4.5`, `glm-4.5-air`. Quota weights: GLM-5.x at 3x peak / 2x off-peak; GLM-4.7 at 1x.
+Available GLM models: `glm-5.3-flash`, `glm-5.3`, `glm-5.1`, `glm-5`, `glm-5-turbo`, `glm-4.7`, `glm-4.6`, `glm-4.5`, `glm-4.5-air`. Quota weights vary by tier — check your Z.ai plan for current weights.
 
 ## Statusline (optional)
 
@@ -150,10 +144,9 @@ Shows Claude 5-hour coding quota and GLM coding quota side-by-side. When the loc
 | `GLM_PROXY_PATH` | — | Absolute path to `bin/glm-proxy.js`, used by SessionStart hook |
 | `PROXY_PORT` | `4000` | Proxy listen port |
 | `DEFAULT_BACKEND` | `claude` | Fallback when no model prefix matches |
-| `GLM_ROUTED_MODEL` | `glm-5.1` | Model the proxy substitutes when routing a non-`glm-*` request to GLM |
+| `GLM_ROUTED_MODEL` | `glm-5.3-flash` | Model the proxy substitutes when routing a non-`glm-*` request to GLM |
 | `GLM_PROXY_URL` | `http://localhost:4000` | Where the hook reaches the proxy |
 | `GLM_PROXY_READY_TIMEOUT_MS` | `3000` | How long the hook polls for proxy readiness after spawning |
-| `GLM_BLOCK_TTL_MS` | `600000` | How long a session stays blocked from GLM after a context overflow |
 | `GLM_FUP_COOLDOWN_MS` | `3600000` | How long GLM-target traffic drains to Claude after a 1313 FUP error |
 | `GLM_PROXY_LOG` | `/tmp/glm-proxy.log` | Where the proxy's stdout/stderr go |
 | `GLM_DEBUG` | unset | Proxy logs per-request metadata |

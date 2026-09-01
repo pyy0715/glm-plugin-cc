@@ -1,41 +1,6 @@
 import { strict as assert } from "node:assert";
-import { beforeEach, describe, it } from "node:test";
-import { clearFupBreaker, isFupTripped } from "../src/router.js";
-import { looksLike1313, maybeTripOnFupError } from "../src/server.js";
-
-describe("maybeTripOnFupError", () => {
-	beforeEach(() => {
-		clearFupBreaker();
-	});
-
-	it("trips on numeric error.code 1313", () => {
-		const parsed = { error: { code: 1313, message: "FUP" } };
-		assert.equal(maybeTripOnFupError(parsed, "test"), true);
-		assert.equal(isFupTripped(), true);
-	});
-
-	it("trips on string error.code '1313'", () => {
-		const parsed = { error: { code: "1313", message: "FUP" } };
-		assert.equal(maybeTripOnFupError(parsed, "test"), true);
-		assert.equal(isFupTripped(), true);
-	});
-
-	it("does not trip on unrelated error codes", () => {
-		const parsed = { error: { code: 1302, message: "concurrency" } };
-		assert.equal(maybeTripOnFupError(parsed, "test"), false);
-		assert.equal(isFupTripped(), false);
-	});
-
-	it("does not trip when parsed is null", () => {
-		assert.equal(maybeTripOnFupError(null, "test"), false);
-		assert.equal(isFupTripped(), false);
-	});
-
-	it("does not trip when error object is missing", () => {
-		assert.equal(maybeTripOnFupError({}, "test"), false);
-		assert.equal(isFupTripped(), false);
-	});
-});
+import { describe, it } from "node:test";
+import { looksLike1313 } from "../src/server.js";
 
 describe("looksLike1313 (SSE chunk sniff)", () => {
 	it("matches numeric form", () => {
