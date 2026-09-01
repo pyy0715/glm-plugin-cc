@@ -13,7 +13,12 @@ const GREEN = "\x1b[32m";
 const YELLOW = "\x1b[33m";
 const RED = "\x1b[31m";
 const RED_BOLD = "\x1b[1;31m";
+const DIM = "\x1b[2m";
 const RESET = "\x1b[0m";
+
+const BAR_WIDTH = 10;
+const FILLED = "█";
+const EMPTY = "░";
 
 function probePort(port) {
 	return new Promise((resolve) => {
@@ -65,12 +70,32 @@ function colorize(pct) {
 	return GREEN;
 }
 
+// Renders a fixed-width Unicode block bar, e.g. "████░░░░░░". Colored by the
+// same red/yellow/green thresholds as the percentage text next to it.
+function renderBar(pct) {
+	const clamped = Math.max(0, Math.min(100, pct));
+	const filledCount = Math.round((clamped / 100) * BAR_WIDTH);
+	const bar = FILLED.repeat(filledCount) + EMPTY.repeat(BAR_WIDTH - filledCount);
+	return `${colorize(clamped)}${bar}${RESET}`;
+}
+
 function formatResetTime(epochSec) {
 	const diffMs = epochSec * 1000 - Date.now();
 	if (diffMs <= 0) return "now";
 	const hours = Math.floor(diffMs / 3_600_000);
 	const mins = Math.floor((diffMs % 3_600_000) / 60_000);
 	return hours > 0 ? `${hours}h${mins > 0 ? `${mins}m` : ""}` : `${mins}m`;
+}
+
+// One row: "<label> <bar> <pct>% (Reset <time>)" — pct and reset are omitted
+// gracefully when the underlying data isn't available yet.
+function renderRow(label, pct, resetEpochSec) {
+	if (pct == null) return `${label} ${DIM}--${RESET}`;
+	const bar = renderBar(pct);
+	const pctText = `${colorize(pct)}${Math.round(pct)}%${RESET}`;
+	const resetText =
+		resetEpochSec != null ? ` ${DIM}(Reset ${formatResetTime(resetEpochSec)})${RESET}` : "";
+	return `${label} ${bar} ${pctText}${resetText}`;
 }
 
 async function loadGlmQuota(cacheDir) {
@@ -135,6 +160,15 @@ async function loadProxyStatus(port) {
 	}
 }
 
+// GLM quota's TOKENS_LIMIT window has no reset timestamp in the API
+// response, unlike Claude's rate_limits.*.resets_at. Surface the reset
+// interval it's documented to use (5h, matching Claude's window) so the row
+// stays visually consistent even without a live countdown.
+function glmResetLabel(quota) {
+	const tokLim = quota.limits?.find((l) => l.type === "TOKENS_LIMIT");
+	return tokLim ? `${DIM}(resets every 5h)${RESET}` : "";
+}
+
 const chunks = [];
 process.stdin.on("data", (chunk) => chunks.push(chunk));
 process.stdin.on("end", async () => {
@@ -145,55 +179,49 @@ process.stdin.on("end", async () => {
 		// Empty or invalid stdin — proceed with defaults
 	}
 
-	const parts = [];
+	const lines = [];
 	// CLAUDE_PLUGIN_DATA is only set in plugin hook context, not in statusLine.
 	// Fall back to /tmp for cache when run from settings.json statusLine command.
 	const cacheDir = process.env.CLAUDE_PLUGIN_DATA || "/tmp";
 
-	// Proxy liveness probe (cached 1s). The indicator is appended at the tail
-	// so the primary quota signals read first; bold-red differentiates it
-	// from the non-bold RED used by quota gauges at ≥85%.
+	// Proxy liveness probe (cached 1s), checked once up front so both the
+	// header line and the tail warning can use it without a second fetch.
 	const proxyAlive = await checkProxyAlive(PROXY_PORT, cacheDir);
 
-	// Claude section: 5h usage + reset time
-	const rl = input.rate_limits;
-	if (rl?.five_hour) {
-		const pct = Math.round(rl.five_hour.used_percentage);
-		const c = colorize(pct);
-		const reset = formatResetTime(rl.five_hour.resets_at);
-		parts.push(`claude 5h:${c}${pct}%${RESET} ~${reset}`);
-	} else {
-		parts.push("claude 5h:--");
-	}
+	// Header: model + context window usage bar.
+	const modelName = input.model?.display_name || "Claude";
+	const ctxPct = input.context_window?.used_percentage ?? null;
+	lines.push(`${modelName} │ ${renderRow("Ctx", ctxPct, null)}`);
 
-	// GLM section
+	// Claude 5h / 7d usage-limit bars with reset time.
+	const rl = input.rate_limits;
+	lines.push(renderRow("5H ", rl?.five_hour?.used_percentage ?? null, rl?.five_hour?.resets_at));
+	lines.push(renderRow("7D ", rl?.seven_day?.used_percentage ?? null, rl?.seven_day?.resets_at));
+
+	// GLM section — same bar style, no reset countdown (API doesn't return
+	// one), just the known window length.
 	const glm = await loadGlmQuota(cacheDir);
 	if (glm) {
-		const stale = glm._stale ? "!" : "";
+		const stale = glm._stale ? ` ${YELLOW}(stale)${RESET}` : "";
 		const level = glm.level || "?";
-
-		// TOKENS_LIMIT = 5-hour coding quota (confirmed via zai-org/zai-coding-plugins)
 		const tokLim = glm.limits?.find((l) => l.type === "TOKENS_LIMIT");
-		if (tokLim) {
-			const pct = tokLim.percentage;
-			const c = colorize(pct);
-			parts.push(`glm[${level}] 5h:${c}${pct}%${stale}${RESET}`);
-		} else {
-			parts.push(`glm[${level}] --`);
-		}
+		const pct = tokLim ? tokLim.percentage : null;
+		lines.push(`${renderRow(`GLM[${level}]`, pct, null)} ${glmResetLabel(glm)}${stale}`);
 	}
 
+	// Tail warnings: proxy down / FUP throttled. Kept as plain text on their
+	// own line so they stay visible even when everything above is `--`.
+	const warnings = [];
 	if (!proxyAlive) {
-		parts.push(`${RED_BOLD}proxy down${RESET}`);
+		warnings.push(`${RED_BOLD}proxy down${RESET}`);
 	} else {
-		// Only query the proxy for breaker state when it's alive — avoids a
-		// redundant failing fetch when probe already said it's down.
 		const status = await loadProxyStatus(PROXY_PORT);
 		if (status?.fupBreaker?.tripped) {
 			const mins = Math.max(1, Math.ceil(status.fupBreaker.cooldownRemainingMs / 60_000));
-			parts.push(`${RED_BOLD}glm throttled (${mins}m)${RESET}`);
+			warnings.push(`${RED_BOLD}glm throttled (${mins}m)${RESET}`);
 		}
 	}
+	if (warnings.length > 0) lines.push(warnings.join(" | "));
 
-	process.stdout.write(parts.join(" | "));
+	process.stdout.write(lines.join("\n"));
 });

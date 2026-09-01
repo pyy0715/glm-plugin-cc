@@ -124,15 +124,21 @@ Add manually to `~/.claude/settings.json`:
 }
 ```
 
-Shows Claude 5-hour coding quota and GLM coding quota side-by-side. When the local proxy is unreachable, `proxy down` appears in bold red.
+Shows a CC-statusline-style block-bar layout: model name + context-window usage, Claude's 5-hour and 7-day rate-limit windows (each with a bar, percentage, and reset time), and GLM's 5-hour coding quota. Deliberately leaves out git status and cost tracking — Claude Code's own status line already covers those if you want them elsewhere. When the local proxy is unreachable, `proxy down` appears in bold red on its own line; if the Z.ai Fair Usage Policy breaker trips, `glm throttled (Nm)` appears there instead.
+
+```
+Sonnet 5 │ Ctx ████░░░░░░ 43%
+5H  ████░░░░░░ 42% (Reset 2h14m)
+7D  ██░░░░░░░░ 18% (Reset 71h59m)
+GLM[max] ░░░░░░░░░░ 1% (resets every 5h)
+```
 
 ## Troubleshooting
 
 - **API errors after `/glm:setup`** — Claude Code picked up `ANTHROPIC_BASE_URL` but the proxy isn't up. `/exit` + `/resume` each session to trigger SessionStart.
 - **`API error: 400 model: String should have at most 256 characters`** — `"model": "glm-..."` in settings.json but proxy isn't running. Start the proxy or remove the `"model"` line.
 - **Port 4000 already in use** — set `PROXY_PORT=<other>` under `env`.
-- **`proxy down` in statusline** — check `lsof -ti:4000` and `/tmp/glm-proxy.log`.
-- **See routing decisions** — `GLM_DEBUG=1` under `env`.
+- **`proxy down` in statusline** — check `lsof -ti:4000` and `/tmp/glm-proxy.log`.- **See routing decisions** — `GLM_DEBUG=1` under `env`.
 - **Cache stale after update** — `ls ~/.claude/plugins/cache/glm-plugin-cc/glm/` and confirm the version directory matches `installed_plugins.json`. A `plugin update` only rebuilds cache when `version` changes.
 
 ## Environment variables
